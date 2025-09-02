@@ -1,6 +1,6 @@
 <div align="center">
   
-# Cameron RLC
+# Cameron Reinforcement Learning Control
 
 <img width="1500" height="500" alt="Cameron RLC Logo" src="https://github.com/user-attachments/assets/42c7c99d-5a26-409d-8faf-7f9f6f12ed1b" />
 
