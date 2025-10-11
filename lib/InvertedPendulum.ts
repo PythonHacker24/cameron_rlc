@@ -1,6 +1,7 @@
 /**
  * Inverted Pendulum Physics Simulation
  * Models the dynamics of an inverted pendulum on a cart
+ * Improved with better numerical stability and failure detection
  */
 export class InvertedPendulum {
   // Physical parameters
@@ -9,7 +10,7 @@ export class InvertedPendulum {
   private length: number = 1.0;          // Length of pendulum (m)
   private gravity: number = 9.81;        // Gravitational acceleration (m/s²)
   private friction: number = 0.1;        // Cart friction coefficient
-  private airResistance: number = 0.0;   // Air resistance coefficient
+  private airResistance: number = 0.01;  // Air resistance coefficient (increased from 0)
   
   // State variables
   public cartPosition: number = 0;       // Cart position (m)
@@ -19,6 +20,12 @@ export class InvertedPendulum {
   
   // Constraints
   private readonly maxCartPosition: number = 5.0; // Maximum cart position (m)
+  private readonly maxCartVelocity: number = 10.0; // Maximum cart velocity (m/s)
+  private readonly maxAngularVelocity: number = 20.0; // Maximum angular velocity (rad/s)
+  
+  // Failure detection
+  private readonly failureAngleThreshold: number = Math.PI / 3; // 60 degrees
+  public hasFailed: boolean = false;
 
   constructor(
     massCart: number = 1.0,
@@ -38,6 +45,18 @@ export class InvertedPendulum {
    * @param dt - Time step (s)
    */
   update(force: number, dt: number): void {
+    // Clamp force to reasonable limits to prevent instability
+    const maxForce = 50.0; // Maximum force in Newtons
+    force = Math.max(-maxForce, Math.min(maxForce, force));
+    
+    // Clamp dt to prevent large time steps
+    dt = Math.min(dt, 0.02); // Maximum 20ms time step
+    
+    // Check if pendulum has failed (fallen too far)
+    if (Math.abs(this.pendulumAngle) > this.failureAngleThreshold) {
+      this.hasFailed = true;
+    }
+    
     // Use RK4 for better numerical stability
     const k1 = this.derivative(force);
     const k2 = this.derivative(force, dt / 2, k1);
@@ -50,13 +69,23 @@ export class InvertedPendulum {
     this.pendulumAngle += (dt / 6) * (k1.dtheta + 2 * k2.dtheta + 2 * k3.dtheta + k4.dtheta);
     this.pendulumAngularVelocity += (dt / 6) * (k1.domega + 2 * k2.domega + 2 * k3.domega + k4.domega);
 
-    // Apply constraints
-    if (Math.abs(this.cartPosition) > this.maxCartPosition) {
-      this.cartPosition = Math.sign(this.cartPosition) * this.maxCartPosition;
-      this.cartVelocity = 0;
+    // Apply velocity constraints (soft limiting with damping)
+    if (Math.abs(this.cartVelocity) > this.maxCartVelocity) {
+      this.cartVelocity = Math.sign(this.cartVelocity) * this.maxCartVelocity * 0.95;
+    }
+    
+    if (Math.abs(this.pendulumAngularVelocity) > this.maxAngularVelocity) {
+      this.pendulumAngularVelocity = Math.sign(this.pendulumAngularVelocity) * this.maxAngularVelocity * 0.95;
     }
 
-    // Normalize angle to [-π, π]
+    // Apply position constraints with velocity damping at boundaries
+    if (Math.abs(this.cartPosition) > this.maxCartPosition) {
+      this.cartPosition = Math.sign(this.cartPosition) * this.maxCartPosition;
+      this.cartVelocity *= -0.5; // Bounce back with energy loss
+    }
+
+    // Normalize angle to [-π, π] - but this doesn't affect control
+    // The controller should handle this properly
     this.pendulumAngle = this.normalizeAngle(this.pendulumAngle);
   }
 
@@ -80,19 +109,29 @@ export class InvertedPendulum {
     // Equations of motion for inverted pendulum on cart
     const totalMass = this.massCart + this.massPendulum;
     const denominator = totalMass - this.massPendulum * cosTheta * cosTheta;
+    
+    // Prevent division by zero
+    if (Math.abs(denominator) < 0.001) {
+      return { dx: v, dv: 0, dtheta: omega, domega: 0 };
+    }
 
+    // Enhanced friction model (velocity dependent)
+    const frictionForce = this.friction * v + 0.01 * v * Math.abs(v);
+    
     // Cart acceleration
     const cartAccel =
-      (force - this.friction * v + 
+      (force - frictionForce + 
        this.massPendulum * this.length * omega * omega * sinTheta -
        this.massPendulum * this.gravity * sinTheta * cosTheta) / denominator;
 
-    // Pendulum angular acceleration (with air resistance on angular velocity)
+    // Pendulum angular acceleration with enhanced damping
+    const angularDamping = this.airResistance * omega + 0.001 * omega * Math.abs(omega);
+    
     const angularAccel =
-      (force * cosTheta - this.friction * v * cosTheta +
+      (force * cosTheta - frictionForce * cosTheta +
        totalMass * this.gravity * sinTheta +
        this.massPendulum * this.length * omega * omega * sinTheta * cosTheta -
-       this.airResistance * omega * this.length) /
+       angularDamping * this.length) /
       (this.length * denominator);
 
     return {
@@ -120,6 +159,7 @@ export class InvertedPendulum {
     this.cartVelocity = 0;
     this.pendulumAngle = initialAngle;
     this.pendulumAngularVelocity = 0;
+    this.hasFailed = false;
   }
 
   /**
@@ -130,12 +170,14 @@ export class InvertedPendulum {
     cartVelocity: number;
     pendulumAngle: number;
     pendulumAngularVelocity: number;
+    hasFailed: boolean;
   } {
     return {
       cartPosition: this.cartPosition,
       cartVelocity: this.cartVelocity,
       pendulumAngle: this.pendulumAngle,
       pendulumAngularVelocity: this.pendulumAngularVelocity,
+      hasFailed: this.hasFailed,
     };
   }
 
@@ -143,15 +185,15 @@ export class InvertedPendulum {
    * Update physical parameters
    */
   setMasses(cartMass: number, pendulumMass: number): void {
-    this.massCart = cartMass;
-    this.massPendulum = pendulumMass;
+    this.massCart = Math.max(0.1, cartMass);
+    this.massPendulum = Math.max(0.01, pendulumMass);
   }
 
   /**
    * Update air resistance
    */
   setAirResistance(resistance: number): void {
-    this.airResistance = resistance;
+    this.airResistance = Math.max(0, resistance);
   }
 
   /**
