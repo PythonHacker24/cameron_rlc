@@ -1,311 +1,421 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect } from "react";
 
 interface PendulumCanvasProps {
   cartPosition: number;
   pendulumAngle: number;
   scale: number;
+  controlForce?: number;
 }
+
+const MONO = '"JetBrains Mono", "Courier New", monospace';
 
 const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
   cartPosition,
   pendulumAngle,
   scale,
+  controlForce = 0,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const W = canvas.width;
+    const H = canvas.height;
+    const cx = W / 2;
+    const cy = H / 2;
 
-    // Set up coordinate system
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
+    ctx.clearRect(0, 0, W, H);
 
-    // Draw background grid (subtle)
-    ctx.strokeStyle = 'rgba(203, 213, 225, 0.3)';
+    // ── Background ──────────────────────────────────────────────
+    ctx.fillStyle = "#050d1a";
+    ctx.fillRect(0, 0, W, H);
+
+    // ── Minor grid (20 px) ──────────────────────────────────────
+    ctx.strokeStyle = "#0e2442";
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x <= W; x += 20) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= H; y += 20) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+
+    // ── Major grid (100 px) ─────────────────────────────────────
+    ctx.strokeStyle = "#162e52";
     ctx.lineWidth = 1;
-    for (let i = 0; i < canvas.width; i += 40) {
+    for (let x = 0; x <= W; x += 100) {
       ctx.beginPath();
-      ctx.moveTo(i, 0);
-      ctx.lineTo(i, canvas.height);
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
       ctx.stroke();
     }
-    for (let i = 0; i < canvas.height; i += 40) {
+    for (let y = 0; y <= H; y += 100) {
       ctx.beginPath();
-      ctx.moveTo(0, i);
-      ctx.lineTo(canvas.width, i);
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
       ctx.stroke();
     }
 
-    // Draw center reference line
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([5, 5]);
+    // ── Center datum (vertical dashed) ──────────────────────────
+    ctx.strokeStyle = "#224c72";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([10, 6]);
     ctx.beginPath();
-    ctx.moveTo(centerX, 0);
-    ctx.lineTo(centerX, canvas.height);
+    ctx.moveTo(cx, 8);
+    ctx.lineTo(cx, H - 8);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Draw track base (3D effect)
-    const trackY = centerY + 72;
-    ctx.fillStyle = '#334155';
-    ctx.fillRect(30, trackY + 2, canvas.width - 60, 12);
-    
-    // Track highlight
-    ctx.strokeStyle = '#64748b';
-    ctx.lineWidth = 3;
+    ctx.fillStyle = "#4a80a8";
+    ctx.font = `9px ${MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText("x = 0", cx, 20);
+
+    // ── TRACK / LINEAR RAIL ─────────────────────────────────────
+    const trackY = cy + 72;
+    const trackPad = 28;
+    const trackH = 8;
+    const trackW = W - 2 * trackPad;
+
+    // Rail bed shadow
+    ctx.fillStyle = "#04090f";
+    ctx.fillRect(trackPad, trackY - trackH / 2 + 2, trackW, trackH);
+
+    // Rail body
+    ctx.fillStyle = "#0e2442";
+    ctx.fillRect(trackPad, trackY - trackH / 2, trackW, trackH);
+
+    // Rail top highlight — main structural line
+    ctx.strokeStyle = "#4080c0";
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(50, trackY);
-    ctx.lineTo(canvas.width - 50, trackY);
+    ctx.moveTo(trackPad, trackY - trackH / 2);
+    ctx.lineTo(W - trackPad, trackY - trackH / 2);
     ctx.stroke();
 
-    // Track shine
-    ctx.strokeStyle = '#94a3b8';
+    // Rail bottom edge
+    ctx.strokeStyle = "#1a3258";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(50, trackY - 2);
-    ctx.lineTo(canvas.width - 50, trackY - 2);
+    ctx.moveTo(trackPad, trackY + trackH / 2);
+    ctx.lineTo(W - trackPad, trackY + trackH / 2);
     ctx.stroke();
 
-    // Cart dimensions and position
-    const cartWidth = 100;
-    const cartHeight = 60;
-    const cartX = centerX + cartPosition * scale;
-    const cartY = centerY + 30;
-
-    // Draw cart shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-    ctx.beginPath();
-    ctx.ellipse(cartX, cartY + cartHeight / 2 + 20, cartWidth / 2 + 5, 8, 0, 0, 2 * Math.PI);
-    ctx.fill();
-
-    // Draw cart body with gradient
-    const cartGradient = ctx.createLinearGradient(
-      cartX - cartWidth / 2,
-      cartY - cartHeight / 2,
-      cartX + cartWidth / 2,
-      cartY + cartHeight / 2
-    );
-    cartGradient.addColorStop(0, '#60a5fa');
-    cartGradient.addColorStop(0.5, '#3b82f6');
-    cartGradient.addColorStop(1, '#2563eb');
-
-    ctx.fillStyle = cartGradient;
-    ctx.strokeStyle = '#1e40af';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = 'rgba(59, 130, 246, 0.4)';
-    ctx.shadowBlur = 15;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 5;
-    
-    ctx.beginPath();
-    ctx.roundRect(
-      cartX - cartWidth / 2,
-      cartY - cartHeight / 2,
-      cartWidth,
-      cartHeight,
-      8
-    );
-    ctx.fill();
-    ctx.stroke();
-    
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-
-    // Cart highlight
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.beginPath();
-    ctx.roundRect(
-      cartX - cartWidth / 2 + 5,
-      cartY - cartHeight / 2 + 5,
-      cartWidth - 10,
-      15,
-      5
-    );
-    ctx.fill();
-
-    // Draw wheels with more detail
-    const wheelRadius = 12;
-    const wheelOffset = 30;
-    
-    for (const offset of [-wheelOffset, wheelOffset]) {
-      const wheelX = cartX + offset;
-      const wheelY = cartY + cartHeight / 2;
-      
-      // Wheel shadow
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+    // Ruler ticks along rail
+    for (let rx = trackPad; rx <= W - trackPad; rx += 40) {
+      const isMajor = (rx - trackPad) % 200 === 0;
+      const tickLen = isMajor ? 10 : 5;
+      ctx.strokeStyle = isMajor ? "#4080c0" : "#1e3858";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(wheelX + 2, wheelY + 2, wheelRadius, 0, 2 * Math.PI);
-      ctx.fill();
-      
-      // Wheel tire
-      const wheelGradient = ctx.createRadialGradient(wheelX - 3, wheelY - 3, 2, wheelX, wheelY, wheelRadius);
-      wheelGradient.addColorStop(0, '#475569');
-      wheelGradient.addColorStop(1, '#1e293b');
-      
-      ctx.fillStyle = wheelGradient;
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(wheelX, wheelY, wheelRadius, 0, 2 * Math.PI);
-      ctx.fill();
+      ctx.moveTo(rx, trackY + trackH / 2);
+      ctx.lineTo(rx, trackY + trackH / 2 + tickLen);
       ctx.stroke();
-      
-      // Wheel hub
-      ctx.fillStyle = '#64748b';
-      ctx.beginPath();
-      ctx.arc(wheelX, wheelY, wheelRadius / 2, 0, 2 * Math.PI);
-      ctx.fill();
-      
-      // Wheel spokes
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 2;
-      for (let i = 0; i < 4; i++) {
-        const angle = (i * Math.PI) / 2;
-        ctx.beginPath();
-        ctx.moveTo(wheelX, wheelY);
-        ctx.lineTo(
-          wheelX + Math.cos(angle) * wheelRadius * 0.8,
-          wheelY + Math.sin(angle) * wheelRadius * 0.8
-        );
-        ctx.stroke();
+      if (isMajor) {
+        const label = ((rx - cx) / scale).toFixed(1);
+        ctx.fillStyle = "#4a7090";
+        ctx.font = `8px ${MONO}`;
+        ctx.textAlign = "center";
+        ctx.fillText(`${label}`, rx, trackY + trackH / 2 + 22);
       }
     }
 
-    // Calculate pendulum position
-    const pendulumLength = 150;
-    const pendulumEndX = cartX + Math.sin(pendulumAngle) * pendulumLength;
-    const pendulumEndY = cartY - Math.cos(pendulumAngle) * pendulumLength;
+    // End stops
+    const stopW = 8;
+    const stopH = 26;
+    ctx.fillStyle = "#122448";
+    ctx.strokeStyle = "#4080c0";
+    ctx.lineWidth = 1.5;
+    for (const sx of [trackPad - stopW, W - trackPad]) {
+      ctx.beginPath();
+      ctx.rect(sx, trackY - stopH / 2, stopW, stopH);
+      ctx.fill();
+      ctx.stroke();
+    }
 
-    // Draw pendulum rod shadow
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
-    ctx.lineWidth = 8;
+    // ── CART ────────────────────────────────────────────────────
+    const cartW = 84;
+    const cartH = 50;
+    const cartX = cx + cartPosition * scale;
+    const cartYc = cy + 30;
+
+    // Linear-guide slide block at cart base
+    const slideH = 12;
+    const slideW = cartW + 10;
+    ctx.fillStyle = "#0e2442";
+    ctx.strokeStyle = "#2a5080";
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cartX + 3, cartY - cartHeight / 2 + 3);
-    ctx.lineTo(pendulumEndX + 3, pendulumEndY + 3);
-    ctx.stroke();
-
-    // Draw pendulum rod with gradient
-    const rodGradient = ctx.createLinearGradient(
-      cartX,
-      cartY - cartHeight / 2,
-      pendulumEndX,
-      pendulumEndY
-    );
-    rodGradient.addColorStop(0, '#94a3b8');
-    rodGradient.addColorStop(0.5, '#64748b');
-    rodGradient.addColorStop(1, '#475569');
-
-    ctx.strokeStyle = rodGradient;
-    ctx.lineWidth = 8;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(cartX, cartY - cartHeight / 2);
-    ctx.lineTo(pendulumEndX, pendulumEndY);
-    ctx.stroke();
-
-    // Rod highlight
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(cartX, cartY - cartHeight / 2);
-    ctx.lineTo(pendulumEndX, pendulumEndY);
-    ctx.stroke();
-
-    // Draw pendulum bob shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-    ctx.beginPath();
-    ctx.arc(pendulumEndX + 3, pendulumEndY + 3, 20, 0, 2 * Math.PI);
-    ctx.fill();
-
-    // Draw pendulum bob with gradient
-    const bobGradient = ctx.createRadialGradient(
-      pendulumEndX - 6,
-      pendulumEndY - 6,
-      5,
-      pendulumEndX,
-      pendulumEndY,
-      20
-    );
-    bobGradient.addColorStop(0, '#fca5a5');
-    bobGradient.addColorStop(0.4, '#ef4444');
-    bobGradient.addColorStop(1, '#b91c1c');
-
-    ctx.fillStyle = bobGradient;
-    ctx.strokeStyle = '#991b1b';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = 'rgba(239, 68, 68, 0.5)';
-    ctx.shadowBlur = 20;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-    ctx.beginPath();
-    ctx.arc(pendulumEndX, pendulumEndY, 20, 0, 2 * Math.PI);
+    ctx.rect(cartX - slideW / 2, trackY - slideH, slideW, slideH);
     ctx.fill();
     ctx.stroke();
-    
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
 
-    // Bob highlight
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.beginPath();
-    ctx.arc(pendulumEndX - 7, pendulumEndY - 7, 6, 0, 2 * Math.PI);
-    ctx.fill();
+    // Slide block channel marks
+    ctx.strokeStyle = "#1e3a58";
+    ctx.lineWidth = 1;
+    for (const dy of [3, 6]) {
+      ctx.beginPath();
+      ctx.moveTo(cartX - slideW / 2 + 4, trackY - dy);
+      ctx.lineTo(cartX + slideW / 2 - 4, trackY - dy);
+      ctx.stroke();
+    }
 
-    // Draw pivot point with detail
-    const pivotX = cartX;
-    const pivotY = cartY - cartHeight / 2;
-    
-    // Pivot base
-    ctx.fillStyle = '#334155';
-    ctx.beginPath();
-    ctx.arc(pivotX, pivotY, 12, 0, 2 * Math.PI);
-    ctx.fill();
-    
-    // Pivot highlight
-    const pivotGradient = ctx.createRadialGradient(pivotX - 2, pivotY - 2, 1, pivotX, pivotY, 8);
-    pivotGradient.addColorStop(0, '#94a3b8');
-    pivotGradient.addColorStop(1, '#475569');
-    
-    ctx.fillStyle = pivotGradient;
-    ctx.strokeStyle = '#1e293b';
+    // Cart main body
+    ctx.fillStyle = "#0c2240";
+    ctx.strokeStyle = "#3a78c0";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(pivotX, pivotY, 8, 0, 2 * Math.PI);
+    ctx.rect(cartX - cartW / 2, cartYc - cartH / 2, cartW, cartH);
     ctx.fill();
     ctx.stroke();
 
-    // Angle indicator arc
-    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.lineWidth = 2;
+    // Body inner border (inset detail)
+    ctx.strokeStyle = "#1e3d5a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.rect(
+      cartX - cartW / 2 + 5,
+      cartYc - cartH / 2 + 5,
+      cartW - 10,
+      cartH - 10,
+    );
+    ctx.stroke();
+
+    // Vertical centerline on cart
+    ctx.strokeStyle = "#1e3d58";
+    ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.arc(pivotX, pivotY, 30, -Math.PI / 2, -Math.PI / 2 + pendulumAngle, pendulumAngle > 0);
+    ctx.moveTo(cartX, cartYc - cartH / 2 + 8);
+    ctx.lineTo(cartX, cartYc + cartH / 2 - 8);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Display angle text
-    const angleDegrees = (pendulumAngle * 180 / Math.PI).toFixed(1);
-    ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${angleDegrees}°`, pivotX, pivotY - 45);
+    // Corner bolt holes
+    const bR = 2.5;
+    const bOffX = cartW / 2 - 9;
+    const bOffY = cartH / 2 - 9;
+    ctx.strokeStyle = "#2a5278";
+    ctx.lineWidth = 1;
+    for (const [bx, by] of [
+      [cartX - bOffX, cartYc - bOffY],
+      [cartX + bOffX, cartYc - bOffY],
+      [cartX - bOffX, cartYc + bOffY],
+      [cartX + bOffX, cartYc + bOffY],
+    ] as [number, number][]) {
+      ctx.beginPath();
+      ctx.arc(bx, by, bR, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
-  }, [cartPosition, pendulumAngle, scale]);
+    // Cart mass label
+    ctx.fillStyle = "#4a80b0";
+    ctx.font = `bold 11px ${MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText("M\u2081", cartX, cartYc + 5);
+
+    // Pivot mount plate atop cart
+    const mountW = 22;
+    const mountH = 10;
+    const mountY = cartYc - cartH / 2;
+    ctx.fillStyle = "#112848";
+    ctx.strokeStyle = "#3a78c0";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.rect(cartX - mountW / 2, mountY - mountH, mountW, mountH);
+    ctx.fill();
+    ctx.stroke();
+
+    // ── FORCE ARROW ─────────────────────────────────────────────
+    const fMag = Math.abs(controlForce);
+    if (fMag > 0.5) {
+      const dir = controlForce > 0 ? 1 : -1;
+      const arrowLen = Math.min(fMag * 0.35, 70);
+      const ay = cartYc;
+      const ax0 = cartX + dir * (cartW / 2 + 4);
+      const ax1 = ax0 + dir * arrowLen;
+
+      ctx.strokeStyle = "#22c55e";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ax0, ay);
+      ctx.lineTo(ax1, ay);
+      ctx.stroke();
+
+      ctx.fillStyle = "#22c55e";
+      ctx.beginPath();
+      ctx.moveTo(ax1, ay);
+      ctx.lineTo(ax1 - dir * 9, ay - 5);
+      ctx.lineTo(ax1 - dir * 9, ay + 5);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#22c55e";
+      ctx.font = `9px ${MONO}`;
+      ctx.textAlign = dir > 0 ? "left" : "right";
+      ctx.fillText("F", ax1 + dir * 5, ay - 7);
+    }
+
+    // ── PENDULUM ROD ────────────────────────────────────────────
+    const rodLen = 150;
+    const pivotX = cartX;
+    const pivotY = mountY - mountH;
+    const bobX = pivotX + Math.sin(pendulumAngle) * rodLen;
+    const bobY = pivotY - Math.cos(pendulumAngle) * rodLen;
+
+    // Vertical reference dashed (upright axis through pivot)
+    ctx.strokeStyle = "#1e4060";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(pivotX, pivotY - 12);
+    ctx.lineTo(pivotX, pivotY - rodLen - 16);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Rod outer (thick, darker core)
+    ctx.strokeStyle = "#3a6080";
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(pivotX, pivotY);
+    ctx.lineTo(bobX, bobY);
+    ctx.stroke();
+
+    // Rod inner highlight (bright centre line)
+    ctx.strokeStyle = "#60a0c8";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pivotX, pivotY);
+    ctx.lineTo(bobX, bobY);
+    ctx.stroke();
+
+    // ── ANGLE ARC ───────────────────────────────────────────────
+    const arcR = 38;
+    const angleDeg = (pendulumAngle * 180) / Math.PI;
+
+    if (Math.abs(pendulumAngle) > 0.01) {
+      ctx.strokeStyle = "#e08010";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (pendulumAngle > 0) {
+        ctx.arc(
+          pivotX,
+          pivotY,
+          arcR,
+          -Math.PI / 2,
+          -Math.PI / 2 + pendulumAngle,
+          false,
+        );
+      } else {
+        ctx.arc(
+          pivotX,
+          pivotY,
+          arcR,
+          -Math.PI / 2 + pendulumAngle,
+          -Math.PI / 2,
+          false,
+        );
+      }
+      ctx.stroke();
+
+      const midA = -Math.PI / 2 + pendulumAngle / 2;
+      const lx = pivotX + Math.cos(midA) * (arcR + 14);
+      const ly = pivotY + Math.sin(midA) * (arcR + 14);
+      ctx.fillStyle = "#e08010";
+      ctx.font = `bold 10px ${MONO}`;
+      ctx.textAlign = "center";
+      ctx.fillText(`${angleDeg.toFixed(1)}\u00b0`, lx, ly);
+    }
+
+    // ── PENDULUM BOB ────────────────────────────────────────────
+    const bobR = 15;
+
+    // Outer ring
+    ctx.strokeStyle = "#3878c0";
+    ctx.lineWidth = 2;
+    ctx.fillStyle = "#0a1e38";
+    ctx.beginPath();
+    ctx.arc(bobX, bobY, bobR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Inner ring
+    ctx.strokeStyle = "#2a5888";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(bobX, bobY, bobR - 5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Crosshair
+    ctx.strokeStyle = "#2a5888";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(bobX - bobR + 3, bobY);
+    ctx.lineTo(bobX + bobR - 3, bobY);
+    ctx.moveTo(bobX, bobY - bobR + 3);
+    ctx.lineTo(bobX, bobY + bobR - 3);
+    ctx.stroke();
+
+    // Bob label
+    ctx.fillStyle = "#4a80b8";
+    ctx.font = `9px ${MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText("m\u2082", bobX, bobY + 4);
+
+    // ── PIVOT BEARING ───────────────────────────────────────────
+    ctx.strokeStyle = "#00b0d8";
+    ctx.lineWidth = 2;
+    ctx.fillStyle = "#0a1e38";
+    ctx.beginPath();
+    ctx.arc(pivotX, pivotY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#00d4f8";
+    ctx.beginPath();
+    ctx.arc(pivotX, pivotY, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── STATE READOUT (top-right corner) ────────────────────────
+    const rx = W - 12;
+    ctx.textAlign = "right";
+    ctx.font = `10px ${MONO}`;
+
+    ctx.fillStyle = "#4a88b8";
+    ctx.fillText(`\u03b8 = ${angleDeg.toFixed(3)}\u00b0`, rx, 18);
+    ctx.fillText(`x = ${cartPosition.toFixed(4)} m`, rx, 34);
+    if (fMag > 0.01) {
+      ctx.fillStyle = "#30a070";
+      ctx.fillText(`F = ${controlForce.toFixed(2)} N`, rx, 50);
+    }
+
+    // ── BOTTOM LABEL ────────────────────────────────────────────
+    ctx.textAlign = "left";
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = "#2a5070";
+    ctx.fillText("CART-POLE  /  INVERTED PENDULUM", 10, H - 10);
+
+    ctx.textAlign = "right";
+    ctx.fillText(`scale: ${scale} px/m`, W - 10, H - 10);
+  }, [cartPosition, pendulumAngle, scale, controlForce]);
 
   return (
     <canvas
       ref={canvasRef}
       width={800}
       height={400}
-      className="w-full h-auto border-2 border-slate-300 rounded-xl shadow-2xl bg-gradient-to-br from-slate-50 via-gray-50 to-slate-100"
+      style={{ display: "block", width: "100%", height: "auto" }}
     />
   );
 };
