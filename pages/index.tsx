@@ -276,6 +276,8 @@ export default function Home() {
   const [pendulumMass, setPendulumMass] = useState(0.1);
   const [airResistance, setAirResistance] = useState(0.0);
 
+  const [simulationSpeed, setSimulationSpeed] = useState(2.0);
+
   const [currentForce, setCurrentForce] = useState(0);
   const [isAtBoundary, setIsAtBoundary] = useState(false);
   const [angleDisplay, setAngleDisplay] = useState(
@@ -312,12 +314,25 @@ export default function Home() {
   const simulate = useCallback(
     (currentTime: number) => {
       if (!pendulumRef.current || !controllerRef.current) return;
+
       const dt =
         lastTimeRef.current === 0
           ? 0.016
           : (currentTime - lastTimeRef.current) / 1000;
       lastTimeRef.current = currentTime;
-      const clampedDt = Math.min(dt, 0.033);
+
+      // Total physics time to advance this visual frame.
+      // simulationSpeed > 1 makes the simulation run faster than real time.
+      const totalPhysicsDt = Math.min(dt, 0.033) * simulationSpeed;
+
+      // Sub-step so each individual RK4 step stays ≤ 16 ms regardless of
+      // the speed multiplier, keeping integration stable at any speed.
+      const SUB_STEP_MAX = 0.016;
+      const steps = Math.ceil(totalPhysicsDt / SUB_STEP_MAX);
+      const subDt = totalPhysicsDt / steps;
+
+      // Compute control force once per visual frame from the current state.
+      // The state barely changes within one frame so one evaluation is enough.
       const state = pendulumRef.current.getState();
       let force = 0;
       if (controllerEnabled) {
@@ -326,7 +341,12 @@ export default function Home() {
         // Sign convention: positive angle → positive force (cart follows the lean).
         force = controllerRef.current.compute(state, currentTime / 1000);
       }
-      pendulumRef.current.update(force, clampedDt);
+
+      // Advance physics in sub-steps with the same force applied throughout.
+      for (let i = 0; i < steps; i++) {
+        pendulumRef.current.update(force, subDt);
+      }
+
       const newState = pendulumRef.current.getState();
       setCartPosition(newState.cartPosition);
       setPendulumAngle(newState.pendulumAngle);
@@ -346,7 +366,7 @@ export default function Home() {
       if (isRunning)
         animationFrameRef.current = requestAnimationFrame(simulate);
     },
-    [isRunning, controllerEnabled],
+    [isRunning, controllerEnabled, simulationSpeed],
   );
 
   useEffect(() => {
@@ -613,9 +633,25 @@ export default function Home() {
               </EngButton>
             </div>
 
+            {/* simulation speed */}
+            <div className="mt-4">
+              <SliderRow
+                label="⏩"
+                sublabel="Sim speed"
+                value={simulationSpeed}
+                displayValue={`${simulationSpeed.toFixed(1)}×`}
+                min={0.25}
+                max={5}
+                step={0.25}
+                onChange={setSimulationSpeed}
+                sliderClass="ss"
+                accent="#a78bfa"
+              />
+            </div>
+
             {/* system state badge */}
             <div
-              className="p-3 mt-2"
+              className="p-3 mt-3"
               style={{ background: "#06101e", border: "1px solid #0a1e30" }}
             >
               <p
@@ -760,7 +796,7 @@ export default function Home() {
           style={{ borderTop: "1px solid #1a3858" }}
         >
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
-            RK4 integration · dt ≤ 20 ms · Full nonlinear equations of motion
+            RK4 integration · sub-stepped · Full nonlinear equations of motion
           </span>
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
             g = 9.81 m/s² · L = 1.0 m
