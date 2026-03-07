@@ -59,7 +59,7 @@ export const defaultPPOConfig: PPOConfig = {
   epsilon: 0.2,
   entropyCoeff: 0.01,
   batchSize: 2048,
-  epochsPerUpdate: 10,
+  epochsPerUpdate: 4,  // 10 causes PPO divergence from stale data; 4 is canonical
   dr: {
     cartMass: [0.75, 1.25],
     pendulumMass: [0.075, 0.125],
@@ -159,6 +159,68 @@ function randn(): number {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Running observation normalizer (Welford's online algorithm)
+//  Tracks per-feature mean and variance; clips normalized output to [-5, 5]
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class RunningNormalizer {
+  mean: Float32Array;
+  M2: Float32Array;   // Welford sum-of-squared-deviations
+  count: number = 0;
+  readonly size: number;
+  private readonly clip = 5.0;
+
+  constructor(size: number) {
+    this.size = size;
+    this.mean = new Float32Array(size);
+    this.M2 = new Float32Array(size);
+  }
+
+  /** Update statistics with one sample (call before normalizing). */
+  update(x: Float32Array): void {
+    this.count++;
+    for (let i = 0; i < this.size; i++) {
+      const delta = x[i] - this.mean[i];
+      this.mean[i] += delta / this.count;
+      const delta2 = x[i] - this.mean[i];
+      this.M2[i] += delta * delta2;
+    }
+  }
+
+  /** Normalize x to zero-mean unit-variance, clipped to ±clip. */
+  normalize(x: Float32Array): Float32Array {
+    if (this.count < 2) return new Float32Array(x);
+    const out = new Float32Array(this.size);
+    for (let i = 0; i < this.size; i++) {
+      const std = Math.sqrt(this.M2[i] / this.count + 1e-8);
+      out[i] = Math.max(-this.clip, Math.min(this.clip, (x[i] - this.mean[i]) / std));
+    }
+    return out;
+  }
+
+  serialize(): { mean: number[]; M2: number[]; count: number } {
+    return { mean: Array.from(this.mean), M2: Array.from(this.M2), count: this.count };
+  }
+
+  load(d: { mean: number[]; M2: number[]; count: number }): void {
+    d.mean.forEach((v, i) => { this.mean[i] = v; });
+    d.M2.forEach((v, i) => { this.M2[i] = v; });
+    this.count = d.count;
+  }
+}
+
+// Clip global gradient norm across all parameter arrays in-place.
+function clipGradNorm(grads: Float32Array[], maxNorm: number): void {
+  let totalSq = 0;
+  for (const g of grads) for (let i = 0; i < g.length; i++) totalSq += g[i] * g[i];
+  const norm = Math.sqrt(totalSq);
+  if (norm > maxNorm) {
+    const scale = maxNorm / norm;
+    for (const g of grads) for (let i = 0; i < g.length; i++) g[i] *= scale;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Actor network: 5 → 64 → 64 → (mu, logSigma)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -192,10 +254,12 @@ export class ActorNetwork {
   }
 
   init(): void {
-    this.layer1.initRandom(0.01);
-    this.layer2.initRandom(0.01);
+    // Hidden layers: scale 0.1 (avoids tanh saturation on first pass)
+    // Output layer: scale 0.01 (small initial mu → near-zero force → safe exploration)
+    this.layer1.initRandom(0.1);
+    this.layer2.initRandom(0.1);
     this.layerMu.initRandom(0.01);
-    this.logSigma[0] = -0.5; // initial sigma ~0.6
+    this.logSigma[0] = -0.5; // initial sigma ≈ 0.61 → moderate exploration noise
   }
 
   forward(state: Float32Array): { mu: number; sigma: number; h1: Float32Array; h2: Float32Array } {
@@ -254,9 +318,9 @@ export class CriticNetwork {
   }
 
   init(): void {
-    this.layer1.initRandom(0.01);
-    this.layer2.initRandom(0.01);
-    this.layerV.initRandom(0.01);
+    this.layer1.initRandom(0.1);
+    this.layer2.initRandom(0.1);
+    this.layerV.initRandom(0.01); // small output → near-zero initial value estimates
   }
 
   forward(state: Float32Array): { value: number; h1: Float32Array; h2: Float32Array } {
@@ -336,6 +400,8 @@ export interface SerializedWeights {
   criticW1: number[]; criticB1: number[];
   criticW2: number[]; criticB2: number[];
   criticWV: number[]; criticBV: number[];
+  // Observation normalizer state (required for correct inference)
+  obsNormMean?: number[]; obsNormM2?: number[]; obsNormCount?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -345,6 +411,7 @@ export interface SerializedWeights {
 export class PPOTrainer {
   actor: ActorNetwork;
   critic: CriticNetwork;
+  obsNorm: RunningNormalizer;   // shared with PPOController after syncFromTrainer
   private config: PPOConfig;
   private env: InvertedPendulum;
 
@@ -379,6 +446,7 @@ export class PPOTrainer {
     this.configRef = config;
     this.actor = new ActorNetwork();
     this.critic = new CriticNetwork();
+    this.obsNorm = new RunningNormalizer(5);
     this.env = new InvertedPendulum();
     this.currentState = new Float32Array(5);
     this._resetEpisode();
@@ -435,11 +503,14 @@ export class PPOTrainer {
 
     for (let i = 0; i < steps; i++) {
       const stateCopy = new Float32Array(this.currentState);
-      const { mu, sigma } = this.actor.forward(stateCopy);
+      // Update normalizer statistics then get normalized obs for network input
+      this.obsNorm.update(stateCopy);
+      const normState = this.obsNorm.normalize(stateCopy);
+      const { mu, sigma } = this.actor.forward(normState);
       const action = mu + sigma * randn();
       const clippedAction = Math.max(-this.currentFmax, Math.min(this.currentFmax, action));
       const lp = this.actor.logProb(action, mu, sigma);
-      const { value } = this.critic.forward(stateCopy);
+      const { value } = this.critic.forward(normState);
 
       this.env.update(clippedAction, this.dt);
 
@@ -458,7 +529,8 @@ export class PPOTrainer {
 
       const done = this._isDone();
 
-      buffer.push({ state: stateCopy, action, reward, value, logProb: lp, done });
+      // Store normalized state — _updateBatch uses it for forward/backward passes
+      buffer.push({ state: normState, action, reward, value, logProb: lp, done });
 
       if (done) {
         const finalAngle = Math.abs(ns.pendulumAngle);
@@ -482,10 +554,11 @@ export class PPOTrainer {
     const returns = new Float32Array(n);
     const cfg = this.configRef;
 
-    // Bootstrap last value
+    // Bootstrap last value using normalized current state
     let nextValue = 0;
     if (!buffer[n - 1].done) {
-      const { value } = this.critic.forward(this.currentState);
+      const normCurrent = this.obsNorm.normalize(this.currentState);
+      const { value } = this.critic.forward(normCurrent);
       nextValue = value;
     }
 
@@ -720,6 +793,16 @@ export class PPOTrainer {
       }
     }
 
+    // Clip global gradient norm (prevents exploding gradients with many epochs)
+    clipGradNorm(
+      [gActorW1, gActorB1, gActorW2, gActorB2, gActorWMu, gActorBMu, gLogSigma],
+      0.5
+    );
+    clipGradNorm(
+      [gCriticW1, gCriticB1, gCriticW2, gCriticB2, gCriticWV, gCriticBV],
+      0.5
+    );
+
     // Apply Adam updates
     const lr = cfg.lr;
     this.actor.adamW1.update(this.actor.layer1.weights, gActorW1, lr);
@@ -782,6 +865,28 @@ export class PPOTrainer {
     return this.env.getState();
   }
 
+  /**
+   * Snapshot of network activations for the current training state.
+   * Returns raw (pre-normalized) obs, normalized obs, and all layer activations.
+   */
+  getActivationSnapshot(): {
+    rawObs: Float32Array;
+    normObs: Float32Array;
+    actorH1: Float32Array;
+    actorH2: Float32Array;
+    actorMu: number;
+    actorSigma: number;
+    criticH1: Float32Array;
+    criticH2: Float32Array;
+    criticValue: number;
+  } {
+    const rawObs = new Float32Array(this.currentState);
+    const normObs = this.obsNorm.normalize(rawObs);
+    const { mu, sigma, h1: actorH1, h2: actorH2 } = this.actor.forward(normObs);
+    const { value: criticValue, h1: criticH1, h2: criticH2 } = this.critic.forward(normObs);
+    return { rawObs, normObs, actorH1, actorH2, actorMu: mu, actorSigma: sigma, criticH1, criticH2, criticValue };
+  }
+
   resetWeights(): void {
     this.actor.init();
     this.critic.init();
@@ -799,6 +904,7 @@ export class PPOTrainer {
     this.episodeCount = 0;
     this.episodeRewards = [];
     this.episodeSuccesses = [];
+    this.obsNorm = new RunningNormalizer(5);
   }
 }
 
@@ -812,12 +918,14 @@ function randRange(lo: number, hi: number): number {
 
 export class PPOController {
   private actor: ActorNetwork;
+  private obsNorm: RunningNormalizer;
   private uPrev: number = 0;
   private _isTrained: boolean = false;
   private fmax: number = 10;
 
   constructor() {
     this.actor = new ActorNetwork();
+    this.obsNorm = new RunningNormalizer(5);
   }
 
   getAction(state: {
@@ -833,7 +941,9 @@ export class PPOController {
       state.pendulumAngularVelocity,
       this.uPrev,
     ]);
-    const { mu } = this.actor.forward(s);
+    // Apply the same normalization used during training
+    const normS = this.obsNorm.normalize(s);
+    const { mu } = this.actor.forward(normS);
     // Use deterministic action (mu) at inference time
     const force = Math.max(-this.fmax, Math.min(this.fmax, mu));
     this.uPrev = force;
@@ -851,10 +961,14 @@ export class PPOController {
     load(this.actor.layerMu.weights, weights.actorWMu);
     load(this.actor.layerMu.biases, weights.actorBMu);
     load(this.actor.logSigma, weights.actorLogSigma);
+    if (weights.obsNormMean && weights.obsNormM2 && weights.obsNormCount !== undefined) {
+      this.obsNorm.load({ mean: weights.obsNormMean, M2: weights.obsNormM2, count: weights.obsNormCount });
+    }
     this._isTrained = true;
   }
 
   saveWeights(): SerializedWeights {
+    const ns = this.obsNorm.serialize();
     return {
       actorW1: Array.from(this.actor.layer1.weights),
       actorB1: Array.from(this.actor.layer1.biases),
@@ -865,6 +979,7 @@ export class PPOController {
       actorLogSigma: Array.from(this.actor.logSigma),
       criticW1: [], criticB1: [], criticW2: [], criticB2: [],
       criticWV: [], criticBV: [],
+      obsNormMean: ns.mean, obsNormM2: ns.M2, obsNormCount: ns.count,
     };
   }
 
@@ -880,6 +995,8 @@ export class PPOController {
     copyArr(this.actor.layerMu.weights, trainer.actor.layerMu.weights);
     copyArr(this.actor.layerMu.biases, trainer.actor.layerMu.biases);
     copyArr(this.actor.logSigma, trainer.actor.logSigma);
+    // Copy normalizer — critical: inference must use same mean/std as training
+    this.obsNorm.load(trainer.obsNorm.serialize());
     this._isTrained = true;
   }
 

@@ -160,6 +160,214 @@ function RangeField({ label, lo, hi, minVal, maxVal, step, onChangeLo, onChangeH
   );
 }
 
+// ─── Network activation visualization ────────────────────────────────────
+
+interface ActivationSnapshot {
+  rawObs: Float32Array;
+  normObs: Float32Array;
+  actorH1: Float32Array;
+  actorH2: Float32Array;
+  actorMu: number;
+  actorSigma: number;
+  criticH1: Float32Array;
+  criticH2: Float32Array;
+  criticValue: number;
+}
+
+/**
+ * Renders a two-column diagram: Actor (left) and Critic (right).
+ * Each column shows: input layer (5 neurons) → H1 (64) → H2 (64) → output.
+ * Neuron colour encodes activation: blue=−1, black=0, orange=+1.
+ * We subsample the 64-neuron layers to 32 rows for readability.
+ */
+function NeuronViz({ snap }: { snap: ActivationSnapshot }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.fillStyle = "#050d1a";
+    ctx.fillRect(0, 0, W, H);
+
+    // Colour for a tanh activation value in [-1, 1]
+    const neuronColor = (v: number): string => {
+      const t = Math.max(-1, Math.min(1, v));
+      if (t >= 0) {
+        // 0→dark, 1→orange (#f59e0b)
+        const r = Math.round(t * 245);
+        const g = Math.round(t * 158);
+        const b = Math.round(t * 11);
+        return `rgb(${r},${g},${b})`;
+      } else {
+        // 0→dark, -1→cyan (#00b8d9)
+        const f = -t;
+        const r = 0;
+        const g = Math.round(f * 184);
+        const b = Math.round(f * 217);
+        return `rgb(${r},${g},${b})`;
+      }
+    };
+
+    const inputNames = ["x", "ẋ", "θ", "θ̇", "u₋₁"];
+    const SUBSAMPLE = 32; // show 32 of 64 hidden neurons
+
+    // Layout constants
+    const colW = W / 2;
+    const padX = 20;
+    const layerXs = [padX + 20, padX + 80, padX + 140, padX + 200];
+    const rNeuron = 4;
+    const lineH = 11; // pixel height per row
+
+    // Draw one network column
+    const drawNetwork = (
+      offsetX: number,
+      title: string,
+      titleColor: string,
+      inputs: Float32Array,
+      inputNames_: string[],
+      h1: Float32Array,
+      h2: Float32Array,
+      outputVal: number,
+      outputLabel: string,
+      outputColor: string,
+    ) => {
+      // Title
+      ctx.fillStyle = titleColor;
+      ctx.font = "bold 9px monospace";
+      ctx.fillText(title, offsetX + padX, 14);
+
+      // Column layer x positions (relative to offsetX)
+      const lx = [offsetX + 30, offsetX + 90, offsetX + 150, offsetX + 210];
+
+      // Helper: draw a neuron column
+      const drawColumn = (x: number, values: Float32Array | number[], labels?: string[]) => {
+        const n = Math.min(values.length, SUBSAMPLE);
+        const totalH = n * lineH;
+        const startY = (H - totalH) / 2;
+        for (let i = 0; i < n; i++) {
+          const v = Array.isArray(values) ? values[i] : (values as Float32Array)[i];
+          const y = startY + i * lineH + lineH / 2;
+          ctx.fillStyle = neuronColor(v);
+          ctx.beginPath();
+          ctx.arc(x, y, rNeuron, 0, Math.PI * 2);
+          ctx.fill();
+          if (labels && labels[i]) {
+            ctx.fillStyle = "#4a7898";
+            ctx.font = "7px monospace";
+            ctx.fillText(labels[i], x + rNeuron + 3, y + 2.5);
+          }
+        }
+        // If subsampled, show ellipsis
+        if ((values as Float32Array).length > SUBSAMPLE) {
+          ctx.fillStyle = "#2a5070";
+          ctx.font = "7px monospace";
+          ctx.fillText("…", x - 3, (H - lineH * SUBSAMPLE) / 2 + lineH * SUBSAMPLE + 10);
+        }
+      };
+
+      // Draw light connector lines between layers
+      const drawConnectors = (x1: number, n1: number, x2: number, n2: number) => {
+        const totalH1 = n1 * lineH;
+        const totalH2 = n2 * lineH;
+        const sy1 = (H - totalH1) / 2;
+        const sy2 = (H - totalH2) / 2;
+        ctx.strokeStyle = "rgba(30,56,80,0.3)";
+        ctx.lineWidth = 0.4;
+        const step1 = Math.max(1, Math.floor(n1 / 8));
+        const step2 = Math.max(1, Math.floor(n2 / 8));
+        for (let i = 0; i < n1; i += step1) {
+          for (let j = 0; j < n2; j += step2) {
+            ctx.beginPath();
+            ctx.moveTo(x1 + rNeuron, sy1 + i * lineH + lineH / 2);
+            ctx.lineTo(x2 - rNeuron, sy2 + j * lineH + lineH / 2);
+            ctx.stroke();
+          }
+        }
+      };
+
+      const h1Sub = new Float32Array(Math.min(64, SUBSAMPLE));
+      const h2Sub = new Float32Array(Math.min(64, SUBSAMPLE));
+      for (let i = 0; i < h1Sub.length; i++) h1Sub[i] = h1[i];
+      for (let i = 0; i < h2Sub.length; i++) h2Sub[i] = h2[i];
+
+      drawConnectors(lx[0], inputs.length, lx[1], SUBSAMPLE);
+      drawConnectors(lx[1], SUBSAMPLE, lx[2], SUBSAMPLE);
+      drawConnectors(lx[2], SUBSAMPLE, lx[3], 1);
+
+      drawColumn(lx[0], inputs, inputNames_);
+      drawColumn(lx[1], h1Sub);
+      drawColumn(lx[2], h2Sub);
+
+      // Output neuron
+      const outY = H / 2;
+      ctx.fillStyle = neuronColor(Math.tanh(outputVal / 10));
+      ctx.beginPath();
+      ctx.arc(lx[3], outY, rNeuron + 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Output label
+      ctx.fillStyle = outputColor;
+      ctx.font = "8px monospace";
+      ctx.fillText(`${outputLabel}: ${outputVal.toFixed(2)}`, lx[3] + rNeuron + 4, outY + 3);
+
+      // Layer labels
+      ctx.fillStyle = "#2a5070";
+      ctx.font = "7px monospace";
+      const labelY = H - 6;
+      ctx.fillText("in", lx[0] - 6, labelY);
+      ctx.fillText("H1", lx[1] - 8, labelY);
+      ctx.fillText("H2", lx[2] - 8, labelY);
+      ctx.fillText("out", lx[3] - 8, labelY);
+    };
+
+    // Divider
+    ctx.strokeStyle = "#1a3858";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0);
+    ctx.lineTo(W / 2, H);
+    ctx.stroke();
+
+    // Draw actor (left)
+    drawNetwork(
+      0, "ACTOR", "#00b8d9",
+      snap.normObs, inputNames,
+      snap.actorH1, snap.actorH2,
+      snap.actorMu, `μ`, "#f59e0b"
+    );
+
+    // Draw critic (right)
+    drawNetwork(
+      W / 2, "CRITIC", "#a78bfa",
+      snap.normObs, inputNames,
+      snap.criticH1, snap.criticH2,
+      snap.criticValue, "V", "#10b981"
+    );
+
+    // Legend
+    ctx.font = "7px monospace";
+    ctx.fillStyle = "#00b8d9"; ctx.fillText("pos", 4, H - 18);
+    ctx.fillStyle = "#f59e0b"; ctx.fillText("+1", 4, H - 10);
+    ctx.fillStyle = "#2a5070"; ctx.fillText("·", 4 + 14, H - 10);
+    ctx.fillStyle = "#4a7898"; ctx.fillText("−1", 4 + 20, H - 10);
+
+  }, [snap]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={560}
+      height={280}
+      style={{ width: "100%", height: "auto", display: "block", background: "#050d1a" }}
+    />
+  );
+}
+
 function Badge({ variant, children }: { variant: "green" | "yellow" | "red"; children: React.ReactNode }) {
   const colors = {
     green: { bg: "#062e18", border: "#0a5e30", color: "#10b981" },
@@ -231,6 +439,7 @@ export default function PPOTrainingPanel({
   const [bestReward, setBestReward] = useState<number | null>(null);
   const [stepsPerFrame, setStepsPerFrame] = useState(1);
   const [latestMetrics, setLatestMetrics] = useState<TrainingMetrics | null>(null);
+  const [activationSnap, setActivationSnap] = useState<ActivationSnapshot | null>(null);
 
   // Live preview state from training env
   const [previewCart, setPreviewCart] = useState(0);
@@ -276,6 +485,9 @@ export default function PPOTrainingPanel({
 
         // Sync weights to the live controller
         ppoController.syncFromTrainer(trainer);
+
+        // Capture activation snapshot every frame (throttled by yield)
+        setActivationSnap(trainer.getActivationSnapshot());
 
         // Update preview state
         const envState = trainer.getEnvState();
@@ -689,6 +901,28 @@ export default function PPOTrainingPanel({
               </div>
             </div>
           </div>
+
+          {/* Network activation visualization */}
+          {activationSnap && (
+            <div style={{ border: `1px solid ${BORDER}`, background: "#050d1a" }}>
+              <div className="px-4 py-2" style={{ borderBottom: `1px solid ${BORDER}` }}>
+                <span className="text-[9px] font-mono tracking-[0.2em] uppercase" style={{ color: TEXT_DIM }}>
+                  Neural Network Activations
+                </span>
+                <span className="text-[9px] font-mono ml-3" style={{ color: "#3a6080" }}>
+                  blue=negative · orange=positive · brightness=magnitude
+                </span>
+              </div>
+              <NeuronViz snap={activationSnap} />
+              <div className="px-4 py-1 flex gap-6 text-[8px] font-mono" style={{ color: "#3a6080", borderTop: `1px solid ${BORDER}` }}>
+                <span>σ={activationSnap.actorSigma.toFixed(3)}</span>
+                <span>μ={activationSnap.actorMu.toFixed(3)}</span>
+                <span>V={activationSnap.criticValue.toFixed(3)}</span>
+                <span>x̄={activationSnap.normObs[0].toFixed(2)}</span>
+                <span>θ̄={activationSnap.normObs[2].toFixed(2)}</span>
+              </div>
+            </div>
+          )}
 
           {/* Loss chart */}
           <div style={{ border: `1px solid ${BORDER}`, background: BG }}>
