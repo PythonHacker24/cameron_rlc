@@ -5,6 +5,7 @@ interface PendulumCanvasProps {
   pendulumAngle: number;
   scale: number;
   controlForce?: number;
+  isAtBoundary?: boolean;
 }
 
 const MONO = '"JetBrains Mono", "Courier New", monospace';
@@ -14,6 +15,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
   pendulumAngle,
   scale,
   controlForce = 0,
+  isAtBoundary = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -22,6 +24,10 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+
+    // Which wall (if any) is the cart currently touching?
+    const atRightWall = isAtBoundary && cartPosition > 0;
+    const atLeftWall = isAtBoundary && cartPosition <= 0;
 
     const W = canvas.width;
     const H = canvas.height;
@@ -130,17 +136,43 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
       }
     }
 
-    // End stops
+    // ── End stops ───────────────────────────────────────────────
+    // Flash red when the cart is pinned against that specific wall.
     const stopW = 8;
     const stopH = 26;
-    ctx.fillStyle = "#122448";
-    ctx.strokeStyle = "#4080c0";
     ctx.lineWidth = 1.5;
-    for (const sx of [trackPad - stopW, W - trackPad]) {
+
+    const stopDefs: { sx: number; hit: boolean }[] = [
+      { sx: trackPad - stopW, hit: atLeftWall },
+      { sx: W - trackPad, hit: atRightWall },
+    ];
+
+    for (const { sx, hit } of stopDefs) {
+      // Body fill
+      ctx.fillStyle = hit ? "#3b0a0a" : "#122448";
+      ctx.strokeStyle = hit ? "#ef4444" : "#4080c0";
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.rect(sx, trackY - stopH / 2, stopW, stopH);
       ctx.fill();
       ctx.stroke();
+
+      if (hit) {
+        // Outer glow
+        ctx.strokeStyle = "rgba(239,68,68,0.30)";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.rect(sx, trackY - stopH / 2, stopW, stopH);
+        ctx.stroke();
+        ctx.lineWidth = 1.5;
+
+        // "WALL" label
+        const labelX = sx < cx ? sx - 5 : sx + stopW + 5;
+        ctx.fillStyle = "#ef4444";
+        ctx.font = `bold 8px ${MONO}`;
+        ctx.textAlign = sx < cx ? "right" : "left";
+        ctx.fillText("WALL", labelX, trackY - stopH / 2 - 4);
+      }
     }
 
     // ── CART ────────────────────────────────────────────────────
@@ -170,9 +202,9 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
       ctx.stroke();
     }
 
-    // Cart main body
-    ctx.fillStyle = "#0c2240";
-    ctx.strokeStyle = "#3a78c0";
+    // Cart main body — tint red when at boundary
+    ctx.fillStyle = isAtBoundary ? "#2a0a0a" : "#0c2240";
+    ctx.strokeStyle = isAtBoundary ? "#ef4444" : "#3a78c0";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.rect(cartX - cartW / 2, cartYc - cartH / 2, cartW, cartH);
@@ -180,7 +212,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
 
     // Body inner border (inset detail)
-    ctx.strokeStyle = "#1e3d5a";
+    ctx.strokeStyle = isAtBoundary ? "#7f1d1d" : "#1e3d5a";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.rect(
@@ -219,7 +251,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // Cart mass label
-    ctx.fillStyle = "#4a80b0";
+    ctx.fillStyle = isAtBoundary ? "#f87171" : "#4a80b0";
     ctx.font = `bold 11px ${MONO}`;
     ctx.textAlign = "center";
     ctx.fillText("M\u2081", cartX, cartYc + 5);
@@ -399,6 +431,10 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
       ctx.fillStyle = "#30a070";
       ctx.fillText(`F = ${controlForce.toFixed(2)} N`, rx, 50);
     }
+    if (isAtBoundary) {
+      ctx.fillStyle = "#ef4444";
+      ctx.fillText("BOUNDARY", rx, 66);
+    }
 
     // ── BOTTOM LABEL ────────────────────────────────────────────
     ctx.textAlign = "left";
@@ -408,7 +444,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
 
     ctx.textAlign = "right";
     ctx.fillText(`scale: ${scale} px/m`, W - 10, H - 10);
-  }, [cartPosition, pendulumAngle, scale, controlForce]);
+  }, [cartPosition, pendulumAngle, scale, controlForce, isAtBoundary]);
 
   return (
     <canvas

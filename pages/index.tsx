@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { InvertedPendulum } from "@/lib/InvertedPendulum";
-import { PIDController } from "@/lib/PIDController";
+import type { IController } from "@/lib/controllers/IController";
+import { PIDController } from "@/lib/controllers/PIDController";
 import PendulumCanvas from "@/components/PendulumCanvas";
 import LiveGraph from "@/components/LiveGraph";
 
@@ -258,7 +259,7 @@ function StatusLED({ active, label }: { active: boolean; label: string }) {
 
 export default function Home() {
   const pendulumRef = useRef<InvertedPendulum | null>(null);
-  const controllerRef = useRef<PIDController | null>(null);
+  const controllerRef = useRef<IController | null>(null);
 
   const [initialAngle, setInitialAngle] = useState(0.1);
 
@@ -276,6 +277,7 @@ export default function Home() {
   const [airResistance, setAirResistance] = useState(0.0);
 
   const [currentForce, setCurrentForce] = useState(0);
+  const [isAtBoundary, setIsAtBoundary] = useState(false);
   const [angleDisplay, setAngleDisplay] = useState(
     initialAngle * (180 / Math.PI),
   );
@@ -294,7 +296,10 @@ export default function Home() {
   }, [initialAngle]);
 
   useEffect(() => {
-    if (controllerRef.current) controllerRef.current.setGains(kp, ki, kd);
+    // setGains is PID-specific — narrow the type before calling it
+    if (controllerRef.current instanceof PIDController) {
+      controllerRef.current.setGains(kp, ki, kd);
+    }
   }, [kp, ki, kd]);
 
   useEffect(() => {
@@ -316,17 +321,17 @@ export default function Home() {
       const state = pendulumRef.current.getState();
       let force = 0;
       if (controllerEnabled) {
-        force = controllerRef.current.calculate(
-          0,
-          state.pendulumAngle,
-          currentTime / 1000,
-        );
+        // compute() receives the full state so every controller has access
+        // to position, velocity, angle, and angular velocity.
+        // Sign convention: positive angle → positive force (cart follows the lean).
+        force = controllerRef.current.compute(state, currentTime / 1000);
       }
       pendulumRef.current.update(force, clampedDt);
       const newState = pendulumRef.current.getState();
       setCartPosition(newState.cartPosition);
       setPendulumAngle(newState.pendulumAngle);
       setCurrentForce(force);
+      setIsAtBoundary(newState.isAtBoundary);
       setAngleDisplay(newState.pendulumAngle * (180 / Math.PI));
       const elapsedTime = (currentTime - startTimeRef.current) / 1000;
       const angleDegrees = newState.pendulumAngle * (180 / Math.PI);
@@ -375,6 +380,7 @@ export default function Home() {
       setCurrentForce(0);
       setAngleDisplay(state.pendulumAngle * (180 / Math.PI));
     }
+    setIsAtBoundary(false);
     setAngleHistory([]);
     setAnglePositionData([]);
     lastTimeRef.current = 0;
@@ -469,6 +475,7 @@ export default function Home() {
             pendulumAngle={pendulumAngle}
             scale={60}
             controlForce={currentForce}
+            isAtBoundary={isAtBoundary}
           />
         </div>
 
@@ -753,7 +760,7 @@ export default function Home() {
           style={{ borderTop: "1px solid #1a3858" }}
         >
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
-            Euler integration · dt ≤ 33 ms · Linearised equations of motion
+            RK4 integration · dt ≤ 20 ms · Full nonlinear equations of motion
           </span>
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
             g = 9.81 m/s² · L = 1.0 m
