@@ -239,6 +239,44 @@ export class InvertedPendulum {
     this.airResistance = Math.max(0, resistance);
   }
 
+  /** Set cart viscous friction coefficient. */
+  setFriction(b: number): void {
+    this.friction = Math.max(0, b);
+  }
+
+  /** Get current friction coefficient. */
+  getFriction(): number {
+    return this.friction;
+  }
+
+  /** Set pendulum rod length (m). */
+  setLength(l: number): void {
+    this.length = Math.max(0.1, l);
+  }
+
+  /** Get current pendulum rod length (m). */
+  getLength(): number {
+    return this.length;
+  }
+
+  /**
+   * Fully reset simulation state to an arbitrary initial condition.
+   * Clears hasFailed and isAtBoundary.
+   */
+  resetFull(state: {
+    x: number;
+    xDot: number;
+    theta: number;
+    thetaDot: number;
+  }): void {
+    this.cartPosition = state.x;
+    this.cartVelocity = state.xDot;
+    this.pendulumAngle = state.theta;
+    this.pendulumAngularVelocity = state.thetaDot;
+    this.hasFailed = false;
+    this.isAtBoundary = false;
+  }
+
   /** Return the current physical parameters. */
   getParameters(): {
     massCart: number;

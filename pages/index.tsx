@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { InvertedPendulum } from "@/lib/InvertedPendulum";
 import type { IController } from "@/lib/controllers/IController";
 import { PIDController } from "@/lib/controllers/PIDController";
+import { PPOController } from "@/lib/controllers/PPOController";
 import { DoublePendulum } from "@/lib/DoublePendulum";
 import PendulumCanvas from "@/components/PendulumCanvas";
 import DoublePendulumCanvas from "@/components/DoublePendulumCanvas";
 import LiveGraph from "@/components/LiveGraph";
+import PPOTrainingPanel from "@/components/PPOTrainingPanel";
 
 interface DataPoint {
   time: number;
@@ -265,6 +267,10 @@ export default function Home() {
   // ── Mode ────────────────────────────────────────────────────────────────────
   const [mode, setMode] = useState<Mode>("single");
 
+  // ── Controller mode ─────────────────────────────────────────────────────────
+  const [controllerMode, setControllerMode] = useState<"pid" | "ppo">("pid");
+  const ppoControllerRef = useRef<PPOController>(new PPOController());
+
   // ── Single-pendulum refs ────────────────────────────────────────────────────
   const pendulumRef = useRef<InvertedPendulum | null>(null);
   const controllerRef = useRef<IController | null>(null);
@@ -368,10 +374,14 @@ export default function Home() {
       const state = pendulumRef.current.getState();
       let force = 0;
       if (controllerEnabled) {
-        // compute() receives the full state so every controller has access
-        // to position, velocity, angle, and angular velocity.
-        // Sign convention: positive angle → positive force (cart follows the lean).
-        force = controllerRef.current.compute(state, currentTime / 1000);
+        if (controllerMode === "ppo" && ppoControllerRef.current.trained) {
+          force = ppoControllerRef.current.getAction(state);
+        } else if (controllerMode === "pid") {
+          // compute() receives the full state so every controller has access
+          // to position, velocity, angle, and angular velocity.
+          // Sign convention: positive angle → positive force (cart follows the lean).
+          force = controllerRef.current.compute(state, currentTime / 1000);
+        }
       }
 
       // Advance physics in sub-steps with the same force applied throughout.
@@ -398,7 +408,7 @@ export default function Home() {
       if (isRunning)
         animationFrameRef.current = requestAnimationFrame(simulate);
     },
-    [isRunning, controllerEnabled, simulationSpeed],
+    [isRunning, controllerEnabled, simulationSpeed, controllerMode],
   );
 
   useEffect(() => {
@@ -425,6 +435,7 @@ export default function Home() {
       cancelAnimationFrame(animationFrameRef.current);
     pendulumRef.current?.reset(initialAngle);
     controllerRef.current?.reset();
+    ppoControllerRef.current.reset();
     const state = pendulumRef.current?.getState();
     if (state) {
       setCartPosition(state.cartPosition);
@@ -598,7 +609,7 @@ export default function Home() {
               style={{ color: "#4a7898" }}
             >
               {mode === "single"
-                ? "Cart-Pole System · PID Control · Real-Time Simulation"
+                ? `Cart-Pole System · ${controllerMode === "ppo" ? "PPO-DR Control" : "PID Control"} · Real-Time Simulation`
                 : "Double Cart-Pole · Free Dynamics · Real-Time Simulation"}
             </p>
           </div>
@@ -655,7 +666,9 @@ export default function Home() {
           )}
           <div className="h-4 w-px" style={{ background: "#0e2035" }} />
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
-            {mode === "single" ? "PID CONTROLLER v2.0" : "FREE DYNAMICS"}
+            {mode === "single"
+              ? controllerMode === "ppo" ? "PPO-DR CONTROLLER v1.0" : "PID CONTROLLER v2.0"
+              : "FREE DYNAMICS"}
           </span>
         </div>
       </div>
@@ -819,6 +832,19 @@ export default function Home() {
           ))}
         </div>
 
+        {/* ── PPO Training Panel (single mode only) ─────────────────────── */}
+        {mode === "single" && (
+          <PPOTrainingPanel
+            controllerMode={controllerMode}
+            onControllerModeChange={(m) => {
+              setControllerMode(m);
+              // Reset PPO uPrev when switching to avoid transient spike
+              if (m === "ppo") ppoControllerRef.current.reset();
+            }}
+            ppoController={ppoControllerRef.current}
+          />
+        )}
+
         {/* ══════════════════════════════════════════════════════════════════
             Bottom panels — mode-switched
         ══════════════════════════════════════════════════════════════════ */}
@@ -914,7 +940,9 @@ export default function Home() {
                 {mode === "double"
                   ? "> no controller  ·  free chaotic dynamics  ·  elastic wall bounce"
                   : controllerEnabled
-                    ? "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
+                    ? controllerMode === "ppo"
+                      ? "> PPO-DR active  ·  target θ = 0.000°  ·  neural network policy"
+                      : "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
                     : "> controller OFF  ·  open-loop  ·  free fall under gravity"}
               </p>
             </div>
