@@ -374,7 +374,7 @@ function computeReward(
   Mp: number, L: number, g: number,
   config: PPOConfig
 ): number {
-  const E = 0.5 * Mp * L * L * thetaDot * thetaDot + Mp * g * L * (1 - Math.cos(theta));
+  const E = 0.5 * Mp * L * L * thetaDot * thetaDot + Mp * g * L * (1 + Math.cos(theta));
   const Eupright = 2 * Mp * g * L;
   const deltaE = E - Eupright;
 
