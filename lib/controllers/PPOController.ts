@@ -63,7 +63,7 @@ export const defaultPPOConfig: PPOConfig = {
   dr: {
     cartMass: [0.75, 1.25],
     pendulumMass: [0.075, 0.125],
-    length: [0.4, 0.6],
+    length: [0.8, 1.2],
     friction: [0.07, 0.13],
     fmax: [9, 11],
   },
@@ -529,8 +529,13 @@ export class PPOTrainer {
 
       const done = this._isDone();
 
+      // Add terminal penalty for failure (falling over or hitting boundary),
+      // but not for timeout — this sharpens the gradient for avoiding failure.
+      const terminalFailed = done && this.episodeStep < this.maxEpisodeSteps;
+      const finalReward = reward + (terminalFailed ? -100 : 0);
+
       // Store normalized state — _updateBatch uses it for forward/backward passes
-      buffer.push({ state: normState, action, reward, value, logProb: lp, done });
+      buffer.push({ state: normState, action, reward: finalReward, value, logProb: lp, done });
 
       if (done) {
         const finalAngle = Math.abs(ns.pendulumAngle);

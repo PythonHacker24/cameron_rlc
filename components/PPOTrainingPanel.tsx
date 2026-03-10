@@ -449,18 +449,21 @@ export default function PPOTrainingPanel({
 
   const trainerRef = useRef<PPOTrainer | null>(null);
   const isTrainingRef = useRef(false);
+  // Always-current config ref so initTrainer never captures a stale closure
+  const configRef = useRef(config);
 
-  // Keep config ref in trainer current
+  // Keep configRef and trainer's configRef in sync whenever config changes
   useEffect(() => {
+    configRef.current = config;
     if (trainerRef.current) {
       trainerRef.current.configRef = config;
     }
   }, [config]);
 
   const initTrainer = useCallback(() => {
-    const trainer = new PPOTrainer(config);
+    const trainer = new PPOTrainer(configRef.current);
     trainerRef.current = trainer;
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // configRef is a stable ref — no deps needed
 
   useEffect(() => {
     initTrainer();
