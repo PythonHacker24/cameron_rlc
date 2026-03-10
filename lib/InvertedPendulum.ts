@@ -19,6 +19,7 @@ export class InvertedPendulum {
   private gravity: number = 9.81; // Gravitational acceleration (m/s²)
   private friction: number = 0.1; // Cart viscous friction coefficient
   private airResistance: number = 0.01; // Pendulum air-resistance coefficient
+  private restitution: number = 0.5; // Coefficient of restitution for wall bounce (0=inelastic, 1=elastic)
 
   // ── State variables ───────────────────────────────────────────────────────
   public cartPosition: number = 0; // Cart position (m)
@@ -96,25 +97,22 @@ export class InvertedPendulum {
         0.95;
     }
 
-    // ── Elastic wall collision ────────────────────────────────────────────
+    // ── Wall collision with restitution ────────────────────────────────────
     //
     //  The wall exerts a purely horizontal normal force on the CART.
     //  It does not directly act on the pendulum, so ω is untouched.
     //
-    //  Perfect elastic bounce  →  v_cart_after = −v_cart_before.
-    //  Cart is repositioned exactly at the boundary so it cannot tunnel.
+    //  v_after = −e · v_before   (e = coefficient of restitution)
+    //  e=1 → perfectly elastic,  e=0 → perfectly inelastic (stops dead).
     //
     this.isAtBoundary = false;
     if (Math.abs(this.cartPosition) >= this.maxCartPosition) {
-      // Clamp to wall surface
       this.cartPosition = Math.sign(this.cartPosition) * this.maxCartPosition;
 
-      // Only reverse if the cart is still moving into the wall
-      // (guards against numerical jitter pushing it the wrong way)
       const movingIntoWall =
         this.cartVelocity * Math.sign(this.cartPosition) > 0;
       if (movingIntoWall) {
-        this.cartVelocity = -this.cartVelocity; // elastic rebound
+        this.cartVelocity = -this.restitution * this.cartVelocity;
       }
 
       this.isAtBoundary = true;
@@ -247,6 +245,11 @@ export class InvertedPendulum {
   /** Update cart track friction coefficient. */
   setFriction(f: number): void {
     this.friction = Math.max(0, f);
+  }
+
+  /** Update wall coefficient of restitution (0=inelastic, 1=elastic). */
+  setRestitution(e: number): void {
+    this.restitution = Math.max(0, Math.min(1, e));
   }
 
   /** Update track half-length (m). */

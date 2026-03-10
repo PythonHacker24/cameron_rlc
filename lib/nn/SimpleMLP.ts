@@ -31,9 +31,10 @@ export class SimpleMLP {
   private t = 0; // Adam step counter
   private readonly b1 = 0.9;
   private readonly b2 = 0.999;
-  private readonly eps = 1e-8;
+  private readonly eps: number;
 
-  constructor(dims: number[]) {
+  constructor(dims: number[], adamEps: number = 1e-8) {
+    this.eps = adamEps;
     this.layers = [];
     for (let i = 0; i < dims.length - 1; i++) {
       const inD = dims[i];
@@ -54,6 +55,19 @@ export class SimpleMLP {
         mb: new Array(outD).fill(0),
         vb: new Array(outD).fill(0),
       });
+    }
+  }
+
+  /**
+   * Re-initialise weights using orthogonal initialisation (standard for PPO).
+   * Hidden layers use gain = √2; the output layer uses `outputGain`.
+   */
+  initOrthogonal(outputGain: number = 1.0): void {
+    for (const l of this.layers) {
+      const gain = l.isLinear ? outputGain : Math.sqrt(2);
+      const Q = orthogonalMatrix(l.outDim, l.inDim);
+      for (let i = 0; i < l.W.length; i++) l.W[i] = Q[i] * gain;
+      l.b.fill(0);
     }
   }
 
@@ -106,6 +120,26 @@ export class SimpleMLP {
   }
 
   /**
+   * Clip accumulated gradients by global L2 norm (before averaging).
+   * Mirrors `nn.utils.clip_grad_norm_` in PyTorch.
+   */
+  clipGradNorm(maxNorm: number): void {
+    let sq = 0;
+    for (const l of this.layers) {
+      for (let i = 0; i < l.gW.length; i++) sq += l.gW[i] * l.gW[i];
+      for (let i = 0; i < l.gb.length; i++) sq += l.gb[i] * l.gb[i];
+    }
+    const norm = Math.sqrt(sq);
+    if (norm > maxNorm) {
+      const scale = maxNorm / norm;
+      for (const l of this.layers) {
+        for (let i = 0; i < l.gW.length; i++) l.gW[i] *= scale;
+        for (let i = 0; i < l.gb.length; i++) l.gb[i] *= scale;
+      }
+    }
+  }
+
+  /**
    * Average accumulated gradients over `n` samples and apply one Adam step.
    * Resets accumulators to zero after updating.
    */
@@ -143,4 +177,47 @@ export class SimpleMLP {
       this.layers[i].b = w.b.slice();
     });
   }
+}
+
+// ── Orthogonal initialisation helper ────────────────────────────────────────
+
+/**
+ * Generate an (rows × cols) orthogonal matrix via QR decomposition of a
+ * random Gaussian matrix.  Returns a flat row-major array of length rows*cols.
+ *
+ * When rows > cols we return Q[:, :cols] (thin Q); when rows < cols we
+ * generate a (cols × cols) Q then take the first `rows` rows.
+ */
+function orthogonalMatrix(rows: number, cols: number): number[] {
+  const n = Math.max(rows, cols);
+  // Fill n×n with standard normal samples (Box-Muller)
+  const A: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    A.push([]);
+    for (let j = 0; j < n; j++) {
+      const u1 = Math.max(Math.random(), 1e-10);
+      const u2 = Math.random();
+      A[i].push(Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2));
+    }
+  }
+  // Modified Gram-Schmidt QR
+  const Q: number[][] = A.map((r) => r.slice());
+  for (let j = 0; j < n; j++) {
+    // Normalise column j
+    let norm = 0;
+    for (let i = 0; i < n; i++) norm += Q[i][j] * Q[i][j];
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < n; i++) Q[i][j] /= norm;
+    // Orthogonalise remaining columns against j
+    for (let k = j + 1; k < n; k++) {
+      let dot = 0;
+      for (let i = 0; i < n; i++) dot += Q[i][j] * Q[i][k];
+      for (let i = 0; i < n; i++) Q[i][k] -= dot * Q[i][j];
+    }
+  }
+  // Extract rows×cols sub-matrix in row-major order
+  const out = new Array(rows * cols);
+  for (let i = 0; i < rows; i++)
+    for (let j = 0; j < cols; j++) out[i * cols + j] = Q[i][j];
+  return out;
 }

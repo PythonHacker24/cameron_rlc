@@ -278,7 +278,7 @@ export default function Home() {
   // ── Double-pendulum ref ─────────────────────────────────────────────────────
   const doublePendulumRef = useRef<DoublePendulum | null>(null);
 
-  const [initialAngle, setInitialAngle] = useState(0.1);
+  const [initialAngle, setInitialAngle] = useState((-63 * Math.PI) / 180);
 
   const [cartPosition, setCartPosition] = useState(0);
   const [pendulumAngle, setPendulumAngle] = useState(initialAngle);
@@ -290,34 +290,26 @@ export default function Home() {
   const [ki, setKi] = useState(1);
   const [kd, setKd] = useState(50);
 
-  // ── PPO reward weights (matching paper §8 defaults) ─────────────────────────
-  const [wE, setWE] = useState(0.1);
-  const [wUpright, setWUpright] = useState(5.0);
-  const [wTheta, setWTheta] = useState(1.0);
-  const [wDot, setWDot] = useState(1.0);
-  const [wx, setWx] = useState(1.0);
-  const [wXdot, setWXdot] = useState(0.5);
-  const [wu, setWu] = useState(0.001);
-  const [wDeltaU, setWDeltaU] = useState(0.01);
-  const [thetaC, setThetaC] = useState(0.3);
-
   // ── PPO hyper-parameters ────────────────────────────────────────────────────
   const [ppoLr, setPpoLr] = useState(3e-4);
   const [ppoGamma, setPpoGamma] = useState(0.99);
   const [ppoClipRatio, setPpoClipRatio] = useState(0.2);
   const [ppoEntropyCoeff, setPpoEntropyCoeff] = useState(0.01);
+  const [ppoVfCoef, setPpoVfCoef] = useState(0.5);
 
   // ── PPO training state ──────────────────────────────────────────────────────
   const [isTrainingPPO, setIsTrainingPPO] = useState(false);
   const [ppoTrained, setPpoTrained] = useState(false);
   const [trainingInfo, setTrainingInfo] = useState<TrainingInfo | null>(null);
+  const [rewardHistory, setRewardHistory] = useState<{ time: number; value: number }[]>([]);
 
   // ── Physical parameters ─────────────────────────────────────────────────────
   const [cartMass, setCartMass] = useState(1.0);
   const [pendulumMass, setPendulumMass] = useState(0.1);
-  const [pendulumLength, setPendulumLength] = useState(1.0);
-  const [trackFriction, setTrackFriction] = useState(0.1);
-  const [airResistance, setAirResistance] = useState(0.0);
+  const [pendulumLength, setPendulumLength] = useState(1.75);
+  const [trackFriction, setTrackFriction] = useState(0.45);
+  const [wallRestitution, setWallRestitution] = useState(0.75);
+  const [airResistance, setAirResistance] = useState(0.3);
 
   const [simulationSpeed, setSimulationSpeed] = useState(2.0);
 
@@ -350,10 +342,15 @@ export default function Home() {
   const dblAnimFrameRef = useRef<number | null>(null);
   const dblLastTimeRef = useRef<number>(0);
 
-  // ── Initialise single pendulum ──────────────────────────────────────────────
+  // ── Initialise / reset single pendulum when initial angle changes ───────────
   useEffect(() => {
     pendulumRef.current = new InvertedPendulum(cartMass, pendulumMass, pendulumLength, initialAngle);
-    controllerRef.current = new PIDController(kp, ki, kd);
+    // Only set controller to PID if we're actually in PID mode
+    if (controllerType === "pid") {
+      controllerRef.current = new PIDController(kp, ki, kd);
+    } else if (ppoRef.current) {
+      controllerRef.current = ppoRef.current;
+    }
     setPendulumAngle(initialAngle);
     setAngleDisplay(initialAngle * (180 / Math.PI));
 
@@ -373,34 +370,51 @@ export default function Home() {
       pendulumRef.current.setMasses(cartMass, pendulumMass);
       pendulumRef.current.setPendulumLength(pendulumLength);
       pendulumRef.current.setFriction(trackFriction);
+      pendulumRef.current.setRestitution(wallRestitution);
       pendulumRef.current.setAirResistance(airResistance);
     }
-  }, [cartMass, pendulumMass, pendulumLength, trackFriction, airResistance]);
+  }, [cartMass, pendulumMass, pendulumLength, trackFriction, wallRestitution, airResistance]);
 
   // ── Switch controller when controllerType changes ───────────────────────────
   useEffect(() => {
     if (controllerType === "pid") {
       controllerRef.current = new PIDController(kp, ki, kd);
+      // PID defaults from screenshot
+      setCartMass(1.0);
+      setPendulumMass(0.1);
+      setPendulumLength(1.75);
+      setTrackFriction(0.45);
+      setWallRestitution(0.75);
+      setAirResistance(0.3);
+      setInitialAngle((-63 * Math.PI) / 180);
     } else {
       // Reuse existing PPO controller (preserves trained weights)
       if (!ppoRef.current) {
         ppoRef.current = new PPOController();
       }
       controllerRef.current = ppoRef.current;
+      // PPO defaults — match the training env physics
+      setCartMass(1.0);
+      setPendulumMass(0.1);
+      setPendulumLength(1.0);
+      setTrackFriction(0.1);
+      setWallRestitution(0.5);
+      setAirResistance(0.01);
+      setInitialAngle(0.5);  // ~29° — clearly falls without a trained controller
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controllerType]);
 
-  // ── Sync PPO reward weights and hyper-parameters live ───────────────────────
+  // ── Sync PPO hyper-parameters live ──────────────────────────────────────────
   useEffect(() => {
     if (ppoRef.current) {
-      ppoRef.current.rw = { wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
       ppoRef.current.hp.lr = ppoLr;
       ppoRef.current.hp.gamma = ppoGamma;
       ppoRef.current.hp.clipRatio = ppoClipRatio;
       ppoRef.current.hp.entropyCoeff = ppoEntropyCoeff;
+      ppoRef.current.hp.vfCoef = ppoVfCoef;
     }
-  }, [wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
+  }, [ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff, ppoVfCoef]);
 
   // ── PPO training handlers ───────────────────────────────────────────────────
   const handleStartTraining = useCallback(() => {
@@ -408,24 +422,26 @@ export default function Home() {
       ppoRef.current = new PPOController();
       controllerRef.current = ppoRef.current;
     }
-    // Sync current weights before training starts
-    ppoRef.current.rw = { wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
+    // Sync current hyper-parameters before training starts
     ppoRef.current.hp.lr = ppoLr;
     ppoRef.current.hp.gamma = ppoGamma;
     ppoRef.current.hp.clipRatio = ppoClipRatio;
     ppoRef.current.hp.entropyCoeff = ppoEntropyCoeff;
+    ppoRef.current.hp.vfCoef = ppoVfCoef;
 
     setIsTrainingPPO(true);
+    setRewardHistory([]);
     ppoRef.current
       .train((info) => {
         setTrainingInfo({ ...info });
+        setRewardHistory((prev) => [...prev, { time: info.updateCount, value: info.meanReward }]);
       })
       .then(() => {
         setIsTrainingPPO(false);
         setPpoTrained(true);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
+  }, [ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff, ppoVfCoef]);
 
   const handleStopTraining = useCallback(() => {
     ppoRef.current?.stopTraining();
@@ -647,7 +663,7 @@ export default function Home() {
     mode === "single"
       ? controllerType === "pid"
         ? "PID CONTROLLER v2.0"
-        : "PI-PPO-DR · Neural Policy"
+        : "PPO · Neural Policy"
       : "FREE DYNAMICS";
 
   return (
@@ -902,6 +918,33 @@ export default function Home() {
           ))}
         </div>
 
+        {/* ── PPO Training Reward Graph (full width) ─────────────────────── */}
+        {rewardHistory.length > 0 && mode === "single" && (
+          <div style={{ border: "1px solid #1a3858", background: "#050d1a", overflow: "hidden" }}>
+            <div
+              className="flex items-center px-4 py-2"
+              style={{ borderBottom: "1px solid #142840", background: "#060d1c" }}
+            >
+              <span
+                className="text-[9px] font-mono tracking-[0.2em]"
+                style={{ color: "#3a6080" }}
+              >
+                CHANNEL 3  ·  PPO TRAINING PROGRESS
+              </span>
+            </div>
+            <LiveGraph
+              data={rewardHistory}
+              title="Episode Reward vs Updates"
+              yLabel="Ep Reward"
+              xLabel="Update"
+              color="#10b981"
+              maxDataPoints={1000}
+              yMin={0}
+              yMax={500}
+            />
+          </div>
+        )}
+
         {/* ══════════════════════════════════════════════════════════════════
             Bottom panels
         ══════════════════════════════════════════════════════════════════ */}
@@ -944,7 +987,7 @@ export default function Home() {
                       cursor: "pointer",
                     }}
                   >
-                    PI-PPO-DR
+                    PPO
                   </button>
                 </div>
               </div>
@@ -1039,7 +1082,7 @@ export default function Home() {
                         ? "> PPO updates running in background"
                         : ppoTrained
                           ? "> Ready · run simulation to use policy"
-                          : "> Set reward weights → Train → Run"}
+                          : "> Train → Run simulation"}
                     </p>
                   </div>
                 </div>
@@ -1058,51 +1101,37 @@ export default function Home() {
             </div>
           )}
 
-          {/* ── Panel 3 ──────────────────────────────────────────────────── */}
+          {/* ── Panel 2: Physical Parameters (always shown) ────────────── */}
           {mode === "single" ? (
-            controllerType === "pid" ? (
-              /* PID — Physical Parameters */
-              <div className="p-5" style={{ border: "1px solid #1a3858", background: "#080e1c" }}>
-                <SectionHeader label="Physical Parameters" />
-                <div className="space-y-5">
-                  <SliderRow label="M₁" sublabel="Cart mass" value={cartMass} displayValue={`${cartMass.toFixed(2)} kg`} min={0.1} max={5} step={0.1} onChange={setCartMass} sliderClass="cm" accent="#64748b" />
-                  <SliderRow label="m₂" sublabel="Pendulum mass" value={pendulumMass} displayValue={`${pendulumMass.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setPendulumMass} sliderClass="pm" accent="#818cf8" />
-                  <SliderRow label="L" sublabel="Pendulum length" value={pendulumLength} displayValue={`${pendulumLength.toFixed(2)} m`} min={0.2} max={2.0} step={0.05} onChange={setPendulumLength} sliderClass="pl" accent="#f472b6" />
-                  <SliderRow label="μ" sublabel="Track friction" value={trackFriction} displayValue={trackFriction.toFixed(2)} min={0} max={2} step={0.05} onChange={setTrackFriction} sliderClass="tf" accent="#64748b" />
-                  <SliderRow label="b" sublabel="Air resistance" value={airResistance} displayValue={airResistance.toFixed(2)} min={0} max={2} step={0.05} onChange={setAirResistance} sliderClass="ar" accent="#2dd4bf" />
-                  <SliderRow label="θ₀" sublabel="Initial angle" value={initialAngle * (180 / Math.PI)} displayValue={`${((initialAngle * 180) / Math.PI).toFixed(1)}°`} min={-180} max={180} step={1} onChange={(v) => setInitialAngle((v * Math.PI) / 180)} sliderClass="ia" accent="#fb923c" />
-                </div>
+            <div className="p-5 overflow-y-auto" style={{ border: "1px solid #1a3858", background: "#080e1c", maxHeight: "600px" }}>
+              <SectionHeader label="Physical Parameters" />
+              <div className="space-y-5">
+                <SliderRow label="M₁" sublabel="Cart mass" value={cartMass} displayValue={`${cartMass.toFixed(2)} kg`} min={0.1} max={5} step={0.1} onChange={setCartMass} sliderClass="cm" accent="#64748b" />
+                <SliderRow label="m₂" sublabel="Pendulum mass" value={pendulumMass} displayValue={`${pendulumMass.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setPendulumMass} sliderClass="pm" accent="#818cf8" />
+                <SliderRow label="L" sublabel="Pendulum length" value={pendulumLength} displayValue={`${pendulumLength.toFixed(2)} m`} min={0.2} max={2.0} step={0.05} onChange={setPendulumLength} sliderClass="pl" accent="#f472b6" />
+                <SliderRow label="μ" sublabel="Track friction" value={trackFriction} displayValue={trackFriction.toFixed(2)} min={0} max={2} step={0.05} onChange={setTrackFriction} sliderClass="tf" accent="#64748b" />
+                <SliderRow label="e" sublabel="Wall restitution" value={wallRestitution} displayValue={wallRestitution.toFixed(2)} min={0} max={1} step={0.05} onChange={setWallRestitution} sliderClass="wr" accent="#ef4444" />
+                <SliderRow label="b" sublabel="Air resistance" value={airResistance} displayValue={airResistance.toFixed(2)} min={0} max={2} step={0.05} onChange={setAirResistance} sliderClass="ar" accent="#2dd4bf" />
+                <SliderRow label="θ₀" sublabel="Initial angle" value={initialAngle * (180 / Math.PI)} displayValue={`${((initialAngle * 180) / Math.PI).toFixed(1)}°`} min={-180} max={180} step={1} onChange={(v) => setInitialAngle((v * Math.PI) / 180)} sliderClass="ia" accent="#fb923c" />
               </div>
-            ) : (
-              /* PPO — Reward Weights + Hyper-parameters */
-              <div className="p-5 overflow-y-auto" style={{ border: "1px solid #1a3858", background: "#080e1c", maxHeight: "520px" }}>
-                <SectionHeader label="Reward Weights" />
-                <p className="text-[9px] font-mono mb-4 -mt-3" style={{ color: "#3a6080" }}>
-                  Adjust before or during training · changes apply immediately
-                </p>
-                <div className="space-y-4">
-                  <SliderRow label="wE" sublabel="Energy error" value={wE} displayValue={wE.toFixed(3)} min={0} max={1} step={0.005} onChange={setWE} sliderClass="we" accent="#a78bfa" />
-                  <SliderRow label="w↑" sublabel="Upright bonus" value={wUpright} displayValue={wUpright.toFixed(1)} min={0} max={20} step={0.5} onChange={setWUpright} sliderClass="wup" accent="#34d399" />
-                  <SliderRow label="wθ" sublabel="Angle error" value={wTheta} displayValue={wTheta.toFixed(1)} min={0} max={50} step={0.5} onChange={setWTheta} sliderClass="wth" accent="#00b8d9" />
-                  <SliderRow label="wθ̇" sublabel="Angular velocity" value={wDot} displayValue={wDot.toFixed(2)} min={0} max={10} step={0.1} onChange={setWDot} sliderClass="wdot" accent="#00b8d9" />
-                  <SliderRow label="wx" sublabel="Position error" value={wx} displayValue={wx.toFixed(2)} min={0} max={10} step={0.1} onChange={setWx} sliderClass="wwx" accent="#10b981" />
-                  <SliderRow label="wẋ" sublabel="Cart velocity" value={wXdot} displayValue={wXdot.toFixed(2)} min={0} max={5} step={0.05} onChange={setWXdot} sliderClass="wxd" accent="#10b981" />
-                  <SliderRow label="wu" sublabel="Control effort" value={wu} displayValue={wu.toFixed(4)} min={0} max={0.05} step={0.0005} onChange={setWu} sliderClass="wwu" accent="#f59e0b" />
-                  <SliderRow label="w∆u" sublabel="Control rate" value={wDeltaU} displayValue={wDeltaU.toFixed(3)} min={0} max={0.1} step={0.001} onChange={setWDeltaU} sliderClass="wdu" accent="#f59e0b" />
-                  <SliderRow label="θc" sublabel="Blend transition" value={thetaC} displayValue={`${thetaC.toFixed(2)} rad`} min={0.05} max={1.0} step={0.05} onChange={setThetaC} sliderClass="wtc" accent="#fb923c" />
-                </div>
 
+              {/* PPO hyper-parameters (shown below physical params when PPO selected) */}
+              {controllerType === "ppo" && (
                 <div className="mt-6">
                   <SectionHeader label="Training Hyper-parameters" />
+                  <p className="text-[9px] font-mono mb-4 -mt-3" style={{ color: "#3a6080" }}>
+                    Discrete actions · +1 reward/step · CartPole-v1 style
+                  </p>
                   <div className="space-y-4">
                     <SliderRow label="lr" sublabel="Learning rate" value={ppoLr * 10000} displayValue={`${(ppoLr * 10000).toFixed(1)}e-4`} min={0.5} max={10} step={0.5} onChange={(v) => setPpoLr(v / 10000)} sliderClass="plr" accent="#a78bfa" disabled={isTrainingPPO} />
                     <SliderRow label="γ" sublabel="Discount factor" value={ppoGamma} displayValue={ppoGamma.toFixed(3)} min={0.9} max={0.999} step={0.001} onChange={setPpoGamma} sliderClass="pgm" accent="#a78bfa" disabled={isTrainingPPO} />
                     <SliderRow label="ε" sublabel="Clip ratio" value={ppoClipRatio} displayValue={ppoClipRatio.toFixed(2)} min={0.05} max={0.5} step={0.01} onChange={setPpoClipRatio} sliderClass="pcr" accent="#a78bfa" disabled={isTrainingPPO} />
-                    <SliderRow label="β_ent" sublabel="Entropy coeff" value={ppoEntropyCoeff} displayValue={ppoEntropyCoeff.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setPpoEntropyCoeff} sliderClass="pec" accent="#a78bfa" disabled={isTrainingPPO} />
+                    <SliderRow label="c_vf" sublabel="Value loss coeff" value={ppoVfCoef} displayValue={ppoVfCoef.toFixed(2)} min={0.1} max={1.0} step={0.05} onChange={setPpoVfCoef} sliderClass="pvf" accent="#a78bfa" disabled={isTrainingPPO} />
+                    <SliderRow label="c_ent" sublabel="Entropy coeff" value={ppoEntropyCoeff} displayValue={ppoEntropyCoeff.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setPpoEntropyCoeff} sliderClass="pec" accent="#a78bfa" disabled={isTrainingPPO} />
                   </div>
                 </div>
-              </div>
-            )
+              )}
+            </div>
           ) : (
             /* Double — Physical Parameters */
             <div className="p-5" style={{ border: "1px solid #1a3858", background: "#080e1c" }}>
@@ -1128,7 +1157,7 @@ export default function Home() {
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
             {mode === "single"
               ? controllerType === "ppo"
-                ? "PI-PPO-DR · actor 5→64→64→2 · critic 5→64→64→1 · GAE-λ · Adam"
+                ? "PPO · discrete {L,R} · actor 4→64→64→2 · critic 4→64→64→1 · GAE-λ · Adam"
                 : "g = 9.81 m/s² · L = 1.0 m · single pole"
               : "g = 9.81 m/s² · L = 5.0 m · double pole · no controller"}
           </span>

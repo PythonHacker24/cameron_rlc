@@ -1,24 +1,17 @@
 /**
- * PI-PPO-DR Controller
+ * PPO Controller — Discrete-Action Proximal Policy Optimisation
  *
- * Physics-Informed Proximal Policy Optimisation with Domain Randomisation,
- * implemented in-browser from scratch (no ML framework dependency).
+ * Ported from ppo.py (CartPole-v1 style).
  *
  * Architecture
  * ────────────
- * Actor  : 5 → 64 → 64 → 2   (outputs μ, log σ for Gaussian policy)
- * Critic : 5 → 64 → 64 → 1   (state-value function V(s))
+ * Actor  : 4 → 64 → 64 → 2   (logits for Categorical distribution)
+ * Critic : 4 → 64 → 64 → 1   (state-value function V(s))
  *
- * State  : [x, ẋ, θ, θ̇, u_{t-1}]  (augmented as per the paper)
- * Action : u ∈ [−Fmax, Fmax]  (clipped Gaussian sample during training, mean during inference)
- *
- * Reward (physics-informed, from paper §6–7)
- * ──────────────────────────────────────────
- *   Rt = −αt · wE · (ΔEt)²
- *        − (1−αt) · (wθ · θ² + wθ̇ · θ̇²)
- *        − wx · x² − wẋ · ẋ²
- *        − wu · u² − w∆u · (u − u_{t-1})²
- *   αt = |θ| / (|θ| + θc)
+ * State  : [x, ẋ, θ, θ̇]  (raw, no normalisation — matches CartPole-v1)
+ * Action : {0 = push left (−Fmax), 1 = push right (+Fmax)}
+ * Reward : +1 every alive step
+ * Done   : |θ| > 12° OR |x| > 2.4 m OR 500 steps
  */
 
 import type { IController, PendulumState } from "./IController";
@@ -32,22 +25,12 @@ export interface PPOHyperparams {
   gamma: number;        // discount factor (default 0.99)
   lam: number;          // GAE λ (default 0.95)
   clipRatio: number;    // PPO ε (default 0.2)
+  vfCoef: number;       // value loss coefficient (default 0.5)
   entropyCoeff: number; // entropy bonus coefficient (default 0.01)
-  batchSize: number;    // steps per outer iteration (default 2048)
-  epochs: number;       // PPO update epochs (default 10)
+  maxGradNorm: number;  // gradient clipping threshold (default 0.5)
+  batchSize: number;    // steps per rollout (default 512)
+  epochs: number;       // PPO update epochs (default 8)
   miniBatchSize: number;// samples per Adam step (default 64)
-}
-
-export interface RewardWeights {
-  wE: number;       // energy-error weight        (default 0.1)
-  wUpright: number; // upright-bonus weight (+cos θ) (default 5.0)
-  wTheta: number;   // angle-error weight          (default 1.0)
-  wDot: number;     // angular-velocity weight     (default 1.0)
-  wx: number;       // position-error weight       (default 1.0)
-  wXdot: number;    // cart-velocity weight        (default 0.5)
-  wu: number;       // control-effort weight       (default 0.001)
-  wDeltaU: number;  // control-rate weight         (default 0.01)
-  thetaC: number;   // blending transition param   (default 0.3 rad)
 }
 
 export interface TrainingInfo {
@@ -63,8 +46,8 @@ export interface TrainingInfo {
 // ── Internal types ────────────────────────────────────────────────────────────
 
 interface Experience {
-  state: number[];  // augmented state [x, ẋ, θ, θ̇, u_prev]
-  action: number;
+  state: number[];  // [x, ẋ, θ, θ̇]
+  action: number;   // 0 or 1
   reward: number;
   logProb: number;  // log π_old(a|s)
   value: number;    // V_old(s)
@@ -74,8 +57,11 @@ interface Experience {
 // ── Controller ────────────────────────────────────────────────────────────────
 
 export class PPOController implements IController {
-  private actor: SimpleMLP;  // policy network
-  private critic: SimpleMLP; // value network
+  private actor: SimpleMLP;   // policy network  → 2 logits
+  private critic: SimpleMLP;  // value network   → 1 scalar
+
+  // Force magnitude (N) — action 0 = −Fmax, action 1 = +Fmax
+  private readonly Fmax = 10.0;
 
   // Hyper-parameters (public so the UI can read/write them live)
   hp: PPOHyperparams = {
@@ -83,30 +69,15 @@ export class PPOController implements IController {
     gamma: 0.99,
     lam: 0.95,
     clipRatio: 0.2,
+    vfCoef: 0.5,
     entropyCoeff: 0.01,
-    batchSize: 2048,
-    epochs: 10,
+    maxGradNorm: 0.5,
+    batchSize: 512,
+    epochs: 8,
     miniBatchSize: 64,
   };
 
-  // Reward weights (public so the UI can read/write them live)
-  rw: RewardWeights = {
-    wE: 0.1,
-    wUpright: 5.0,
-    wTheta: 1.0,
-    wDot: 1.0,
-    wx: 1.0,
-    wXdot: 0.5,
-    wu: 0.001,
-    wDeltaU: 0.01,
-    thetaC: 0.3,
-  };
-
-  // Action bounds (paper §4 recommends 10 N for Fmax)
-  private readonly Fmax = 10.0;
-
   // Internal state
-  private prevAction = 0;
   private _isTraining = false;
   private stopFlag = false;
   private _isTrained = false;
@@ -114,39 +85,34 @@ export class PPOController implements IController {
   private _updateCount = 0;
 
   constructor() {
-    this.actor = new SimpleMLP([5, 64, 64, 2]);
-    this.critic = new SimpleMLP([5, 64, 64, 1]);
+    // Adam eps = 1e-5 to match PyTorch default used in ppo.py
+    this.actor = new SimpleMLP([4, 64, 64, 2], 1e-5);
+    this.critic = new SimpleMLP([4, 64, 64, 1], 1e-5);
+    // Orthogonal init (standard for PPO)
+    this.actor.initOrthogonal(0.01);   // small output gain for near-uniform initial policy
+    this.critic.initOrthogonal(1.0);
   }
 
   // ── IController ─────────────────────────────────────────────────────────────
 
   /**
    * Returns the cart force for the current state.
-   * Uses the policy mean (deterministic) — training samples internally.
+   * Uses argmax (deterministic greedy) at inference time.
    */
   compute(state: PendulumState, _ts: number): number {
-    const s = this.augState(state);
+    const s = this.stateVec(state);
     const { out } = this.actor.forward(s);
-    const mu = out[0];
-    // Use mean action for stable inference
-    const action = Math.max(-this.Fmax, Math.min(this.Fmax, mu));
-    this.prevAction = action;
-    return action;
+    // Greedy: pick highest-logit action
+    const action = out[1] > out[0] ? 1 : 0;
+    return action === 1 ? this.Fmax : -this.Fmax;
   }
 
   reset(): void {
-    this.prevAction = 0;
+    // No recurrent state to reset for discrete PPO
   }
 
-  // ── Training ────────────────────────────────────────────────────────────────
+  // ── Training ──────────────────────────────────────────────────────────────
 
-  /**
-   * Asynchronous PPO training loop.
-   * Yields to the browser between outer iterations to keep the UI live.
-   * Call stopTraining() to halt early.
-   *
-   * @param onUpdate  Called after every PPO update with training metrics.
-   */
   async train(onUpdate: (info: TrainingInfo) => void): Promise<void> {
     this._isTraining = true;
     this.stopFlag = false;
@@ -154,161 +120,147 @@ export class PPOController implements IController {
     let totalEpisodes = 0;
 
     while (!this.stopFlag) {
-      // ── 1. Collect batchSize steps ────────────────────────────────────────
+      // ── 1. Collect batchSize steps (rollout) ──────────────────────────
       const buffer: Experience[] = [];
       const epRewards: number[] = [];
       let curEpReward = 0;
 
-      let { env, mp, L } = this.makeEnv();
-      let prevU = 0;
+      let env = this.makeEnv();
       let epSteps = 0;
-      const maxEpSteps = 500; // 10 s at 50 Hz — prevents one episode consuming entire batch
 
       while (buffer.length < this.hp.batchSize && !this.stopFlag) {
         const raw = env.getState();
-        const s = this.makeState(
-          raw.cartPosition, raw.cartVelocity,
-          raw.pendulumAngle, raw.pendulumAngularVelocity,
-          prevU,
-        );
+        const s = [raw.cartPosition, raw.cartVelocity,
+                    raw.pendulumAngle, raw.pendulumAngularVelocity];
 
-        // Actor: sample action from Gaussian policy
-        const { out: aOut } = this.actor.forward(s);
-        const mu = aOut[0];
-        const logStd = Math.max(-2, Math.min(0.5, aOut[1]));
-        const std = Math.exp(logStd);
-        const action = Math.max(
-          -this.Fmax,
-          Math.min(this.Fmax, mu + std * this.randn()),
-        );
-        const logProb = this.gaussLogProb(action, mu, logStd);
+        // Actor: get logits and sample from categorical
+        const { out: logits } = this.actor.forward(s);
+        const probs = softmax(logits);
+        const action = sampleCategorical(probs);
+        const lp = logProb(logits, action);
 
         // Critic: estimate value
         const { out: cOut } = this.critic.forward(s);
         const value = cOut[0];
 
-        // Step environment at 50 Hz
-        env.update(action, 0.02);
+        // Apply force and step physics at 50 Hz
+        const force = action === 1 ? this.Fmax : -this.Fmax;
+        env.update(force, 0.02);
         const next = env.getState();
         epSteps++;
-        const done =
-          Math.abs(next.cartPosition) > 2.4 ||
-          epSteps >= maxEpSteps;
 
-        const reward = this.computeReward(raw, action, prevU, mp, L);
+        // Done conditions (match CartPole-v1)
+        const terminated =
+          Math.abs(next.pendulumAngle) > 0.2095 ||   // ~12°
+          Math.abs(next.cartPosition) > 2.4;
+        const truncated = epSteps >= 500;
+        const done = terminated || truncated;
+
+        // Reward: +1 every alive step (CartPole-v1 style)
+        const reward = 1.0;
         curEpReward += reward;
 
-        buffer.push({ state: s, action, reward, logProb, value, done });
-        prevU = action;
+        buffer.push({ state: s, action, reward, logProb: lp, value, done });
 
         if (done) {
           epRewards.push(curEpReward);
           curEpReward = 0;
           epSteps = 0;
-          const created = this.makeEnv();
-          env = created.env;
-          mp = created.mp;
-          L = created.L;
-          prevU = 0;
+          env = this.makeEnv();
           totalEpisodes++;
         }
       }
 
       if (this.stopFlag) break;
 
-      // ── 2. GAE advantage estimation ───────────────────────────────────────
+      // ── 2. GAE advantage estimation ─────────────────────────────────
       const lastRaw = env.getState();
-      const lastS = this.makeState(
-        lastRaw.cartPosition, lastRaw.cartVelocity,
-        lastRaw.pendulumAngle, lastRaw.pendulumAngularVelocity,
-        prevU,
-      );
+      const lastS = [lastRaw.cartPosition, lastRaw.cartVelocity,
+                      lastRaw.pendulumAngle, lastRaw.pendulumAngularVelocity];
       const { out: lastV } = this.critic.forward(lastS);
       const { returns, advantages } = this.gae(buffer, lastV[0]);
 
-      // Normalise advantages
-      const mean =
-        advantages.reduce((a, b) => a + b, 0) / advantages.length;
-      const std =
-        Math.sqrt(
-          advantages.reduce((a, b) => a + (b - mean) ** 2, 0) /
-            advantages.length,
-        ) + 1e-8;
-      const normAdv = advantages.map((a) => (a - mean) / std);
-
-      // ── 3. PPO update for K epochs ────────────────────────────────────────
-      let sumPL = 0,
-        sumVL = 0,
-        sumEnt = 0,
-        cnt = 0;
+      // ── 3. PPO update for K epochs ──────────────────────────────────
+      let sumPL = 0, sumVL = 0, sumEnt = 0, cnt = 0;
 
       for (let epoch = 0; epoch < this.hp.epochs; epoch++) {
         const idx = this.shuffle(
           Array.from({ length: buffer.length }, (_, i) => i),
         );
 
-        for (
-          let start = 0;
-          start < idx.length;
-          start += this.hp.miniBatchSize
-        ) {
+        for (let start = 0; start < idx.length; start += this.hp.miniBatchSize) {
           const batch = idx.slice(start, start + this.hp.miniBatchSize);
           const bLen = batch.length;
 
+          // Normalise advantages per mini-batch (as in ppo.py)
+          let advMean = 0, advVar = 0;
+          for (const i of batch) advMean += advantages[i];
+          advMean /= bLen;
+          for (const i of batch) advVar += (advantages[i] - advMean) ** 2;
+          const advStd = Math.sqrt(advVar / bLen) + 1e-8;
+
           for (const i of batch) {
             const exp = buffer[i];
-            const adv = normAdv[i];
+            const adv = (advantages[i] - advMean) / advStd;
             const ret = returns[i];
 
-            // ── Actor gradient ─────────────────────────────────────────────
-            const { out: aOut, caches: aCaches } = this.actor.forward(
-              exp.state,
-            );
-            const mu = aOut[0];
-            const rawLogStd = aOut[1];
-            const logStd = Math.max(-2, Math.min(0.5, rawLogStd));
-            const logStdClamped = rawLogStd !== logStd; // gradient is zero when clamped
-            const expStd = Math.exp(logStd);
+            // ── Actor forward ──────────────────────────────────────
+            const { out: aLogits, caches: aCaches } = this.actor.forward(exp.state);
+            const aProbs = softmax(aLogits);
+            const newLP = logProb(aLogits, exp.action);
 
-            const newLP = this.gaussLogProb(exp.action, mu, logStd);
+            // PPO ratio
             const logRatio = Math.max(-10, Math.min(10, newLP - exp.logProb));
             const ratio = Math.exp(logRatio);
 
+            // Clipped surrogate
             const eps = this.hp.clipRatio;
-            // Gradient is non-zero only when the ratio is inside the clip region
+            const surr1 = ratio * adv;
+            const surr2 = Math.max(1 - eps, Math.min(1 + eps, ratio)) * adv;
+            const policyLoss = -Math.min(surr1, surr2);
+
+            // Entropy: H = -Σ p_i * log(p_i)
+            let H = 0;
+            for (let k = 0; k < aProbs.length; k++) {
+              if (aProbs[k] > 1e-8) H -= aProbs[k] * Math.log(aProbs[k]);
+            }
+
+            // Gradient of policy loss w.r.t. log_prob
             const active =
               (adv >= 0 && ratio < 1 + eps) || (adv < 0 && ratio > 1 - eps);
+            const g_lp = active ? -ratio * adv : 0;
 
-            const dL_dLP = active ? -adv * ratio : 0;
+            // Actor gradient w.r.t. logits[j]:
+            //   g_lp * (δ(a,j) - p[j])  +  entCoeff * p[j] * (log(p[j]) + H)
+            const dLogits = new Array(aLogits.length);
+            for (let j = 0; j < aLogits.length; j++) {
+              const indicator = j === exp.action ? 1 : 0;
+              const dPolicy = g_lp * (indicator - aProbs[j]);
+              const logP = aProbs[j] > 1e-8 ? Math.log(aProbs[j]) : -20;
+              const dEntropy = this.hp.entropyCoeff * aProbs[j] * (logP + H);
+              dLogits[j] = dPolicy + dEntropy;  // d(policyLoss + entCoeff*(-H))/dz_j
+            }
+            this.actor.accumulate(dLogits, aCaches);
 
-            // d log_prob / d mu      =  (a - μ) / σ²
-            // d log_prob / d log_σ  =  (a - μ)² / σ² − 1
-            const delta = (exp.action - mu) / (expStd * expStd);
-            const dL_dMu = dL_dLP * delta;
-            const dL_dLogStd = logStdClamped
-              ? 0 // no gradient through clamp
-              : dL_dLP * (delta * (exp.action - mu) - 1) -
-                this.hp.entropyCoeff; // entropy maximisation
-
-            this.actor.accumulate([dL_dMu, dL_dLogStd], aCaches);
-
-            // ── Critic gradient ────────────────────────────────────────────
-            const { out: cOut, caches: cCaches } = this.critic.forward(
-              exp.state,
-            );
+            // ── Critic forward ─────────────────────────────────────
+            const { out: cOut, caches: cCaches } = this.critic.forward(exp.state);
             const v = cOut[0];
-            this.critic.accumulate([2 * (v - ret)], cCaches);
+            const valueLoss = (v - ret) ** 2;
+            this.critic.accumulate([2 * this.hp.vfCoef * (v - ret)], cCaches);
 
-            // ── Metrics ───────────────────────────────────────────────────
-            const clippedR = Math.max(1 - eps, Math.min(1 + eps, ratio));
-            sumPL += -Math.min(ratio * adv, clippedR * adv);
-            sumVL += (v - ret) ** 2;
-            sumEnt += 0.5 * (1 + Math.log(2 * Math.PI)) + logStd;
+            // ── Metrics ────────────────────────────────────────────
+            sumPL += policyLoss;
+            sumVL += valueLoss;
+            sumEnt += H;
             cnt++;
           }
 
+          // Gradient clipping (match ppo.py: MAX_GRAD_NORM = 0.5)
+          this.actor.clipGradNorm(this.hp.maxGradNorm * bLen);
+          this.critic.clipGradNorm(this.hp.maxGradNorm * bLen);
+
           this.actor.applyGradients(this.hp.lr, bLen);
-          this.critic.applyGradients(this.hp.lr * 0.5, bLen);
+          this.critic.applyGradients(this.hp.lr, bLen);
         }
       }
 
@@ -343,105 +295,21 @@ export class PPOController implements IController {
     this._isTraining = false;
   }
 
-  // ── Accessors ────────────────────────────────────────────────────────────────
+  // ── Accessors ──────────────────────────────────────────────────────────────
 
-  get isTraining(): boolean {
-    return this._isTraining;
-  }
-  get isTrained(): boolean {
-    return this._isTrained;
-  }
-  get totalSteps(): number {
-    return this._totalSteps;
-  }
-  get updateCount(): number {
-    return this._updateCount;
-  }
+  get isTraining(): boolean { return this._isTraining; }
+  get isTrained(): boolean { return this._isTrained; }
+  get totalSteps(): number { return this._totalSteps; }
+  get updateCount(): number { return this._updateCount; }
 
-  // ── Private helpers ──────────────────────────────────────────────────────────
+  // ── Private helpers ────────────────────────────────────────────────────────
 
-  /** Normalise raw state + previous action into ~[-1, 1] for the network. */
-  private makeState(
-    x: number, xd: number, th: number, thd: number, prevU: number,
-  ): number[] {
-    return [
-      x / 2.4,
-      xd / 5.0,
-      th / Math.PI,
-      thd / 10.0,
-      prevU / this.Fmax,
-    ];
-  }
-
-  private augState(s: PendulumState): number[] {
-    return this.makeState(
-      s.cartPosition, s.cartVelocity,
-      s.pendulumAngle, s.pendulumAngularVelocity,
-      this.prevAction,
-    );
-  }
-
-  /** Log-probability of `action` under N(μ, exp(logStd)). */
-  private gaussLogProb(action: number, mu: number, logStd: number): number {
-    const std = Math.exp(logStd);
-    const z = (action - mu) / std;
-    return -0.5 * z * z - logStd - 0.5 * Math.log(2 * Math.PI);
-  }
-
-  /** Box-Muller standard normal sample. */
-  private randn(): number {
-    const u1 = Math.max(Math.random(), 1e-10);
-    const u2 = Math.random();
-    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  private stateVec(s: PendulumState): number[] {
+    return [s.cartPosition, s.cartVelocity, s.pendulumAngle, s.pendulumAngularVelocity];
   }
 
   /**
-   * Physics-informed reward (paper §6–7).
-   *
-   * @param state    Current plant state (before stepping)
-   * @param action   Applied force (N)
-   * @param prevU    Previous force (N)
-   * @param mp       Pendulum mass for this episode (kg)
-   * @param L        Pendulum length for this episode (m)
-   */
-  private computeReward(
-    state: {
-      cartPosition: number;
-      cartVelocity: number;
-      pendulumAngle: number;
-      pendulumAngularVelocity: number;
-    },
-    action: number,
-    prevU: number,
-    mp: number,
-    L: number,
-  ): number {
-    const { cartPosition: x, cartVelocity: xd, pendulumAngle: th, pendulumAngularVelocity: thd } = state;
-    const w = this.rw;
-    const g = 9.81;
-
-    // Total pendulum energy (rotational KE + PE from upright)
-    const E = 0.5 * mp * L * L * thd * thd + mp * g * L * (1 + Math.cos(th));
-    const Eup = 2 * mp * g * L; // energy at upright equilibrium
-    const dE = E - Eup;
-
-    // Adaptive blending: α→1 when far from upright (swing-up regime)
-    const alpha = Math.abs(th) / (Math.abs(th) + w.thetaC);
-
-    return (
-      w.wUpright * Math.cos(th) -          // positive bonus for being upright
-      alpha * w.wE * dE * dE -
-      (1 - alpha) * (w.wTheta * th * th + w.wDot * thd * thd) -
-      w.wx * x * x -
-      w.wXdot * xd * xd -
-      w.wu * action * action -
-      w.wDeltaU * (action - prevU) ** 2
-    );
-  }
-
-  /**
-   * Generalised Advantage Estimation (GAE-λ).
-   * Returns discounted returns and advantage estimates.
+   * GAE (Generalised Advantage Estimation) — matches ppo.py compute_gae exactly.
    */
   private gae(
     buf: Experience[],
@@ -450,47 +318,38 @@ export class PPOController implements IController {
     const { gamma, lam } = this.hp;
     const n = buf.length;
     const adv = new Array<number>(n);
-    const ret = new Array<number>(n);
-    let lastAdv = 0;
-    let lv = lastValue;
+    let gae = 0;
 
     for (let t = n - 1; t >= 0; t--) {
       const { reward, value, done } = buf[t];
-      const mask = done ? 0 : 1;
-      const nextV = t < n - 1 ? buf[t + 1].value : lv;
-      const delta = reward + gamma * nextV * mask - value;
-      adv[t] = lastAdv = delta + gamma * lam * mask * lastAdv;
-      ret[t] = adv[t] + value;
+      const notDone = done ? 0 : 1;
+      const nextVal = t === n - 1 ? lastValue : buf[t + 1].value;
+      const delta = reward + gamma * nextVal * notDone - value;
+      gae = delta + gamma * lam * notDone * gae;
+      adv[t] = gae;
     }
+
+    const ret = adv.map((a, i) => a + buf[i].value);
     return { returns: ret, advantages: adv };
   }
 
   /**
-   * Create a new training episode environment with domain randomisation.
-   * Returns the env plus the actual mp and L used (for reward computation).
+   * Create a new training episode environment.
+   * Uses default physics (mc=1, mp=0.1, L=1) — no domain randomisation,
+   * matching CartPole-v1.
    */
-  private makeEnv(): { env: InvertedPendulum; mp: number; L: number } {
-    // Domain randomisation ranges from paper §4
-    const mc = 1.0 * this.randu(0.75, 1.25);
-    const mp = 0.1 * this.randu(0.75, 1.25);
-    const L = 1.0 * this.randu(0.8, 1.2);
+  private makeEnv(): InvertedPendulum {
+    // Small random initial state (like CartPole-v1 reset: uniform ±0.05)
+    const x0 = (Math.random() * 2 - 1) * 0.05;
+    const xd0 = (Math.random() * 2 - 1) * 0.05;
+    const th0 = (Math.random() * 2 - 1) * 0.05;
+    const thd0 = (Math.random() * 2 - 1) * 0.05;
 
-    // Randomised initial conditions — start near upright for balance learning
-    const theta0 = (Math.random() * 2 - 1) * 0.5;
-    const x0 = (Math.random() * 2 - 1) * 0.2;
-    const xdot0 = (Math.random() * 2 - 1) * 0.1;
-    const tdot0 = (Math.random() * 2 - 1) * 0.5;
-
-    const env = new InvertedPendulum(mc, mp, L, theta0);
+    const env = new InvertedPendulum(1.0, 0.1, 1.0, th0);
     env.cartPosition = x0;
-    env.cartVelocity = xdot0;
-    env.pendulumAngularVelocity = tdot0;
-
-    return { env, mp, L };
-  }
-
-  private randu(lo: number, hi: number): number {
-    return lo + Math.random() * (hi - lo);
+    env.cartVelocity = xd0;
+    env.pendulumAngularVelocity = thd0;
+    return env;
   }
 
   private shuffle(arr: number[]): number[] {
@@ -500,4 +359,30 @@ export class PPOController implements IController {
     }
     return arr;
   }
+}
+
+// ── Distribution helpers ────────────────────────────────────────────────────
+
+function softmax(logits: number[]): number[] {
+  const max = Math.max(...logits);
+  const exps = logits.map((z) => Math.exp(z - max));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map((e) => e / sum);
+}
+
+function logProb(logits: number[], action: number): number {
+  // log softmax(logits)[action] = logits[action] - logsumexp(logits)
+  const max = Math.max(...logits);
+  const lse = max + Math.log(logits.reduce((s, z) => s + Math.exp(z - max), 0));
+  return logits[action] - lse;
+}
+
+function sampleCategorical(probs: number[]): number {
+  const u = Math.random();
+  let cum = 0;
+  for (let i = 0; i < probs.length; i++) {
+    cum += probs[i];
+    if (u < cum) return i;
+  }
+  return probs.length - 1;
 }
