@@ -6,6 +6,7 @@ interface PendulumCanvasProps {
   scale: number;
   controlForce?: number;
   isAtBoundary?: boolean;
+  pendulumLength?: number;
 }
 
 const MONO = '"JetBrains Mono", "Courier New", monospace';
@@ -16,6 +17,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
   scale,
   controlForce = 0,
   isAtBoundary = false,
+  pendulumLength = 1.0,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -176,8 +178,8 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── CART ────────────────────────────────────────────────────
-    const cartW = 84;
-    const cartH = 50;
+    const cartW = 56;
+    const cartH = 34;
     const cartX = cx + cartPosition * scale;
     const cartYc = cy + 30;
 
@@ -299,7 +301,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── PENDULUM ROD ────────────────────────────────────────────
-    const rodLen = 150;
+    const rodLen = pendulumLength * scale * 2.5;
     const pivotX = cartX;
     const pivotY = mountY - mountH;
     const bobX = pivotX + Math.sin(pendulumAngle) * rodLen;
@@ -371,7 +373,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── PENDULUM BOB ────────────────────────────────────────────
-    const bobR = 15;
+    const bobR = Math.max(8, 12 * pendulumLength);
 
     // Outer ring
     ctx.strokeStyle = "#3878c0";
@@ -444,7 +446,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
 
     ctx.textAlign = "right";
     ctx.fillText(`scale: ${scale} px/m`, W - 10, H - 10);
-  }, [cartPosition, pendulumAngle, scale, controlForce, isAtBoundary]);
+  }, [cartPosition, pendulumAngle, scale, controlForce, isAtBoundary, pendulumLength]);
 
   return (
     <canvas

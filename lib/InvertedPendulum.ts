@@ -27,7 +27,7 @@ export class InvertedPendulum {
   public pendulumAngularVelocity: number = 0; // Angular velocity (rad/s)
 
   // ── Constraints ───────────────────────────────────────────────────────────
-  private readonly maxCartPosition: number = 5.0; // Track half-length (m)
+  private maxCartPosition: number = 8.0; // Track half-length (m)
   private readonly maxCartVelocity: number = 10.0; // Soft velocity cap (m/s)
   private readonly maxAngularVelocity: number = 20.0;
 
@@ -62,7 +62,7 @@ export class InvertedPendulum {
    */
   update(force: number, dt: number): void {
     // ── Sanitise inputs ───────────────────────────────────────────────────
-    const maxForce = 50.0;
+    const maxForce = 10.0;
     force = Math.max(-maxForce, Math.min(maxForce, force));
     dt = Math.min(dt, 0.02); // cap to 20 ms for numerical stability
 
@@ -239,16 +239,37 @@ export class InvertedPendulum {
     this.airResistance = Math.max(0, resistance);
   }
 
+  /** Update pendulum rod length (m). */
+  setPendulumLength(len: number): void {
+    this.length = Math.max(0.1, len);
+  }
+
+  /** Update cart track friction coefficient. */
+  setFriction(f: number): void {
+    this.friction = Math.max(0, f);
+  }
+
+  /** Update track half-length (m). */
+  setTrackLength(halfLen: number): void {
+    this.maxCartPosition = Math.max(1.0, halfLen);
+  }
+
   /** Return the current physical parameters. */
   getParameters(): {
     massCart: number;
     massPendulum: number;
     airResistance: number;
+    length: number;
+    friction: number;
+    trackHalfLength: number;
   } {
     return {
       massCart: this.massCart,
       massPendulum: this.massPendulum,
       airResistance: this.airResistance,
+      length: this.length,
+      friction: this.friction,
+      trackHalfLength: this.maxCartPosition,
     };
   }
 }

@@ -39,14 +39,15 @@ export interface PPOHyperparams {
 }
 
 export interface RewardWeights {
-  wE: number;      // energy-error weight       (default 0.1)
-  wTheta: number;  // angle-error weight         (default 10.0)
-  wDot: number;    // angular-velocity weight    (default 1.0)
-  wx: number;      // position-error weight      (default 1.0)
-  wXdot: number;   // cart-velocity weight       (default 0.5)
-  wu: number;      // control-effort weight      (default 0.001)
-  wDeltaU: number; // control-rate weight        (default 0.01)
-  thetaC: number;  // blending transition param  (default 0.3 rad)
+  wE: number;       // energy-error weight        (default 0.1)
+  wUpright: number; // upright-bonus weight (+cos θ) (default 5.0)
+  wTheta: number;   // angle-error weight          (default 1.0)
+  wDot: number;     // angular-velocity weight     (default 1.0)
+  wx: number;       // position-error weight       (default 1.0)
+  wXdot: number;    // cart-velocity weight        (default 0.5)
+  wu: number;       // control-effort weight       (default 0.001)
+  wDeltaU: number;  // control-rate weight         (default 0.01)
+  thetaC: number;   // blending transition param   (default 0.3 rad)
 }
 
 export interface TrainingInfo {
@@ -91,7 +92,8 @@ export class PPOController implements IController {
   // Reward weights (public so the UI can read/write them live)
   rw: RewardWeights = {
     wE: 0.1,
-    wTheta: 10.0,
+    wUpright: 5.0,
+    wTheta: 1.0,
     wDot: 1.0,
     wx: 1.0,
     wXdot: 0.5,
@@ -159,16 +161,16 @@ export class PPOController implements IController {
 
       let { env, mp, L } = this.makeEnv();
       let prevU = 0;
+      let epSteps = 0;
+      const maxEpSteps = 500; // 10 s at 50 Hz — prevents one episode consuming entire batch
 
       while (buffer.length < this.hp.batchSize && !this.stopFlag) {
         const raw = env.getState();
-        const s: number[] = [
-          raw.cartPosition,
-          raw.cartVelocity,
-          raw.pendulumAngle,
-          raw.pendulumAngularVelocity,
+        const s = this.makeState(
+          raw.cartPosition, raw.cartVelocity,
+          raw.pendulumAngle, raw.pendulumAngularVelocity,
           prevU,
-        ];
+        );
 
         // Actor: sample action from Gaussian policy
         const { out: aOut } = this.actor.forward(s);
@@ -188,7 +190,10 @@ export class PPOController implements IController {
         // Step environment at 50 Hz
         env.update(action, 0.02);
         const next = env.getState();
-        const done = Math.abs(next.cartPosition) > 2.4; // paper §9: xlimit = 2.4 m
+        epSteps++;
+        const done =
+          Math.abs(next.cartPosition) > 2.4 ||
+          epSteps >= maxEpSteps;
 
         const reward = this.computeReward(raw, action, prevU, mp, L);
         curEpReward += reward;
@@ -199,6 +204,7 @@ export class PPOController implements IController {
         if (done) {
           epRewards.push(curEpReward);
           curEpReward = 0;
+          epSteps = 0;
           const created = this.makeEnv();
           env = created.env;
           mp = created.mp;
@@ -212,13 +218,11 @@ export class PPOController implements IController {
 
       // ── 2. GAE advantage estimation ───────────────────────────────────────
       const lastRaw = env.getState();
-      const lastS = [
-        lastRaw.cartPosition,
-        lastRaw.cartVelocity,
-        lastRaw.pendulumAngle,
-        lastRaw.pendulumAngularVelocity,
+      const lastS = this.makeState(
+        lastRaw.cartPosition, lastRaw.cartVelocity,
+        lastRaw.pendulumAngle, lastRaw.pendulumAngularVelocity,
         prevU,
-      ];
+      );
       const { out: lastV } = this.critic.forward(lastS);
       const { returns, advantages } = this.gae(buffer, lastV[0]);
 
@@ -261,7 +265,9 @@ export class PPOController implements IController {
               exp.state,
             );
             const mu = aOut[0];
-            const logStd = Math.max(-2, Math.min(0.5, aOut[1]));
+            const rawLogStd = aOut[1];
+            const logStd = Math.max(-2, Math.min(0.5, rawLogStd));
+            const logStdClamped = rawLogStd !== logStd; // gradient is zero when clamped
             const expStd = Math.exp(logStd);
 
             const newLP = this.gaussLogProb(exp.action, mu, logStd);
@@ -279,9 +285,10 @@ export class PPOController implements IController {
             // d log_prob / d log_σ  =  (a - μ)² / σ² − 1
             const delta = (exp.action - mu) / (expStd * expStd);
             const dL_dMu = dL_dLP * delta;
-            const dL_dLogStd =
-              dL_dLP * (delta * (exp.action - mu) - 1) -
-              this.hp.entropyCoeff; // entropy maximisation
+            const dL_dLogStd = logStdClamped
+              ? 0 // no gradient through clamp
+              : dL_dLP * (delta * (exp.action - mu) - 1) -
+                this.hp.entropyCoeff; // entropy maximisation
 
             this.actor.accumulate([dL_dMu, dL_dLogStd], aCaches);
 
@@ -353,14 +360,25 @@ export class PPOController implements IController {
 
   // ── Private helpers ──────────────────────────────────────────────────────────
 
-  private augState(s: PendulumState): number[] {
+  /** Normalise raw state + previous action into ~[-1, 1] for the network. */
+  private makeState(
+    x: number, xd: number, th: number, thd: number, prevU: number,
+  ): number[] {
     return [
-      s.cartPosition,
-      s.cartVelocity,
-      s.pendulumAngle,
-      s.pendulumAngularVelocity,
-      this.prevAction,
+      x / 2.4,
+      xd / 5.0,
+      th / Math.PI,
+      thd / 10.0,
+      prevU / this.Fmax,
     ];
+  }
+
+  private augState(s: PendulumState): number[] {
+    return this.makeState(
+      s.cartPosition, s.cartVelocity,
+      s.pendulumAngle, s.pendulumAngularVelocity,
+      this.prevAction,
+    );
   }
 
   /** Log-probability of `action` under N(μ, exp(logStd)). */
@@ -403,7 +421,7 @@ export class PPOController implements IController {
     const g = 9.81;
 
     // Total pendulum energy (rotational KE + PE from upright)
-    const E = 0.5 * mp * L * L * thd * thd + mp * g * L * (1 - Math.cos(th));
+    const E = 0.5 * mp * L * L * thd * thd + mp * g * L * (1 + Math.cos(th));
     const Eup = 2 * mp * g * L; // energy at upright equilibrium
     const dE = E - Eup;
 
@@ -411,7 +429,8 @@ export class PPOController implements IController {
     const alpha = Math.abs(th) / (Math.abs(th) + w.thetaC);
 
     return (
-      -alpha * w.wE * dE * dE -
+      w.wUpright * Math.cos(th) -          // positive bonus for being upright
+      alpha * w.wE * dE * dE -
       (1 - alpha) * (w.wTheta * th * th + w.wDot * thd * thd) -
       w.wx * x * x -
       w.wXdot * xd * xd -
@@ -442,10 +461,6 @@ export class PPOController implements IController {
       const delta = reward + gamma * nextV * mask - value;
       adv[t] = lastAdv = delta + gamma * lam * mask * lastAdv;
       ret[t] = adv[t] + value;
-      if (done) {
-        lastAdv = 0;
-        lv = 0;
-      }
     }
     return { returns: ret, advantages: adv };
   }
@@ -460,8 +475,8 @@ export class PPOController implements IController {
     const mp = 0.1 * this.randu(0.75, 1.25);
     const L = 1.0 * this.randu(0.8, 1.2);
 
-    // Randomised initial conditions from paper §5
-    const theta0 = (Math.random() * 2 - 1) * Math.PI;
+    // Randomised initial conditions — start near upright for balance learning
+    const theta0 = (Math.random() * 2 - 1) * 0.5;
     const x0 = (Math.random() * 2 - 1) * 0.2;
     const xdot0 = (Math.random() * 2 - 1) * 0.1;
     const tdot0 = (Math.random() * 2 - 1) * 0.5;

@@ -292,7 +292,8 @@ export default function Home() {
 
   // ── PPO reward weights (matching paper §8 defaults) ─────────────────────────
   const [wE, setWE] = useState(0.1);
-  const [wTheta, setWTheta] = useState(10.0);
+  const [wUpright, setWUpright] = useState(5.0);
+  const [wTheta, setWTheta] = useState(1.0);
   const [wDot, setWDot] = useState(1.0);
   const [wx, setWx] = useState(1.0);
   const [wXdot, setWXdot] = useState(0.5);
@@ -314,6 +315,8 @@ export default function Home() {
   // ── Physical parameters ─────────────────────────────────────────────────────
   const [cartMass, setCartMass] = useState(1.0);
   const [pendulumMass, setPendulumMass] = useState(0.1);
+  const [pendulumLength, setPendulumLength] = useState(1.0);
+  const [trackFriction, setTrackFriction] = useState(0.1);
   const [airResistance, setAirResistance] = useState(0.0);
 
   const [simulationSpeed, setSimulationSpeed] = useState(2.0);
@@ -349,7 +352,7 @@ export default function Home() {
 
   // ── Initialise single pendulum ──────────────────────────────────────────────
   useEffect(() => {
-    pendulumRef.current = new InvertedPendulum(1.0, 0.1, 1.0, initialAngle);
+    pendulumRef.current = new InvertedPendulum(cartMass, pendulumMass, pendulumLength, initialAngle);
     controllerRef.current = new PIDController(kp, ki, kd);
     setPendulumAngle(initialAngle);
     setAngleDisplay(initialAngle * (180 / Math.PI));
@@ -368,9 +371,11 @@ export default function Home() {
   useEffect(() => {
     if (pendulumRef.current) {
       pendulumRef.current.setMasses(cartMass, pendulumMass);
+      pendulumRef.current.setPendulumLength(pendulumLength);
+      pendulumRef.current.setFriction(trackFriction);
       pendulumRef.current.setAirResistance(airResistance);
     }
-  }, [cartMass, pendulumMass, airResistance]);
+  }, [cartMass, pendulumMass, pendulumLength, trackFriction, airResistance]);
 
   // ── Switch controller when controllerType changes ───────────────────────────
   useEffect(() => {
@@ -389,13 +394,13 @@ export default function Home() {
   // ── Sync PPO reward weights and hyper-parameters live ───────────────────────
   useEffect(() => {
     if (ppoRef.current) {
-      ppoRef.current.rw = { wE, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
+      ppoRef.current.rw = { wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
       ppoRef.current.hp.lr = ppoLr;
       ppoRef.current.hp.gamma = ppoGamma;
       ppoRef.current.hp.clipRatio = ppoClipRatio;
       ppoRef.current.hp.entropyCoeff = ppoEntropyCoeff;
     }
-  }, [wE, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
+  }, [wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
 
   // ── PPO training handlers ───────────────────────────────────────────────────
   const handleStartTraining = useCallback(() => {
@@ -404,7 +409,7 @@ export default function Home() {
       controllerRef.current = ppoRef.current;
     }
     // Sync current weights before training starts
-    ppoRef.current.rw = { wE, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
+    ppoRef.current.rw = { wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC };
     ppoRef.current.hp.lr = ppoLr;
     ppoRef.current.hp.gamma = ppoGamma;
     ppoRef.current.hp.clipRatio = ppoClipRatio;
@@ -420,7 +425,7 @@ export default function Home() {
         setPpoTrained(true);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wE, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
+  }, [wE, wUpright, wTheta, wDot, wx, wXdot, wu, wDeltaU, thetaC, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff]);
 
   const handleStopTraining = useCallback(() => {
     ppoRef.current?.stopTraining();
@@ -730,6 +735,58 @@ export default function Home() {
 
       {/* ── Main layout ─────────────────────────────────────────────────── */}
       <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-4">
+
+        {/* ── Simulation Control ────────────────────────────────────────── */}
+        <div className="p-5" style={{ border: "1px solid #0e2035", background: "#080e1c" }}>
+          <SectionHeader label="Simulation Control" />
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-2">
+              <EngButton onClick={handleStart} disabled={isRunning} variant="active">Run</EngButton>
+              <EngButton onClick={handleStop} disabled={!isRunning} variant="warn">Pause</EngButton>
+              <EngButton onClick={mode === "single" ? handleReset : handleDblReset} variant="danger">Reset</EngButton>
+            </div>
+            {mode === "single" ? (
+              <>
+                <EngButton onClick={handlePerturbation} disabled={!isRunning} variant="ghost">
+                  Inject Disturbance +0.3 rad
+                </EngButton>
+                <EngButton onClick={toggleController} variant={controllerEnabled ? "default" : "active"}>
+                  {controllerEnabled ? "Disable Controller" : "Enable Controller"}
+                </EngButton>
+              </>
+            ) : (
+              <EngButton onClick={handleDblPerturbation} disabled={!isRunning} variant="ghost">
+                Inject Disturbance ±0.25 rad
+              </EngButton>
+            )}
+            <div className="flex items-center gap-3 ml-auto">
+              <SliderRow
+                label="⏩"
+                sublabel="Sim speed"
+                value={simulationSpeed}
+                displayValue={`${simulationSpeed.toFixed(1)}×`}
+                min={0.25}
+                max={5}
+                step={0.25}
+                onChange={setSimulationSpeed}
+                sliderClass="ss"
+                accent="#a78bfa"
+              />
+            </div>
+          </div>
+          <div className="p-3 mt-3" style={{ background: "#06101e", border: "1px solid #0a1e30" }}>
+            <p className="text-[9px] font-mono leading-relaxed" style={{ color: "#3a6080" }}>
+              {mode === "double"
+                ? "> no controller  ·  free chaotic dynamics  ·  elastic wall bounce"
+                : controllerType === "ppo"
+                  ? ppoStatusText
+                  : controllerEnabled
+                    ? "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
+                    : "> controller OFF  ·  open-loop  ·  free fall under gravity"}
+            </p>
+          </div>
+        </div>
+
         {/* ── Canvas ────────────────────────────────────────────────────── */}
         <div
           style={{ border: "1px solid #1a3858", background: "#050d1a", overflow: "hidden" }}
@@ -745,23 +802,24 @@ export default function Home() {
               Simulation View
             </span>
             <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
-              scale: 60 px/m
+              scale: 40 px/m
             </span>
           </div>
           {mode === "single" ? (
             <PendulumCanvas
               cartPosition={cartPosition}
               pendulumAngle={pendulumAngle}
-              scale={60}
+              scale={40}
               controlForce={currentForce}
               isAtBoundary={isAtBoundary}
+              pendulumLength={pendulumLength}
             />
           ) : (
             <DoublePendulumCanvas
               cartPosition={dblCartPosition}
               theta1={dblTheta1}
               theta2={dblTheta2}
-              scale={60}
+              scale={40}
               isAtBoundary={dblIsAtBoundary}
               length1={dblLength1}
               length2={dblLength2}
@@ -847,84 +905,9 @@ export default function Home() {
         {/* ══════════════════════════════════════════════════════════════════
             Bottom panels
         ══════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
-          {/* ── Panel 1: Simulation Control (shared) ────────────────────── */}
-          <div className="p-5" style={{ border: "1px solid #0e2035", background: "#080e1c" }}>
-            <SectionHeader label="Simulation Control" />
-
-            <div className="space-y-2 mb-4">
-              <div className="grid grid-cols-3 gap-2">
-                <EngButton onClick={handleStart} disabled={isRunning} variant="active">
-                  Run
-                </EngButton>
-                <EngButton onClick={handleStop} disabled={!isRunning} variant="warn">
-                  Pause
-                </EngButton>
-                <EngButton onClick={mode === "single" ? handleReset : handleDblReset} variant="danger">
-                  Reset
-                </EngButton>
-              </div>
-
-              {mode === "single" ? (
-                <>
-                  <EngButton
-                    onClick={handlePerturbation}
-                    disabled={!isRunning}
-                    className="w-full"
-                    variant="ghost"
-                  >
-                    Inject Disturbance +0.3 rad
-                  </EngButton>
-                  <EngButton
-                    onClick={toggleController}
-                    className="w-full"
-                    variant={controllerEnabled ? "default" : "active"}
-                  >
-                    {controllerEnabled ? "Disable Controller" : "Enable Controller"}
-                  </EngButton>
-                </>
-              ) : (
-                <EngButton
-                  onClick={handleDblPerturbation}
-                  disabled={!isRunning}
-                  className="w-full"
-                  variant="ghost"
-                >
-                  Inject Disturbance ±0.25 rad
-                </EngButton>
-              )}
-            </div>
-
-            <div className="mt-4">
-              <SliderRow
-                label="⏩"
-                sublabel="Sim speed"
-                value={simulationSpeed}
-                displayValue={`${simulationSpeed.toFixed(1)}×`}
-                min={0.25}
-                max={5}
-                step={0.25}
-                onChange={setSimulationSpeed}
-                sliderClass="ss"
-                accent="#a78bfa"
-              />
-            </div>
-
-            <div className="p-3 mt-3" style={{ background: "#06101e", border: "1px solid #0a1e30" }}>
-              <p className="text-[9px] font-mono leading-relaxed" style={{ color: "#3a6080" }}>
-                {mode === "double"
-                  ? "> no controller  ·  free chaotic dynamics  ·  elastic wall bounce"
-                  : controllerType === "ppo"
-                    ? ppoStatusText
-                    : controllerEnabled
-                      ? "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
-                      : "> controller OFF  ·  open-loop  ·  free fall under gravity"}
-              </p>
-            </div>
-          </div>
-
-          {/* ── Panel 2 ──────────────────────────────────────────────────── */}
+          {/* ── Panel 1 ──────────────────────────────────────────────────── */}
           {mode === "single" ? (
             <div
               className="p-5"
@@ -1084,6 +1067,8 @@ export default function Home() {
                 <div className="space-y-5">
                   <SliderRow label="M₁" sublabel="Cart mass" value={cartMass} displayValue={`${cartMass.toFixed(2)} kg`} min={0.1} max={5} step={0.1} onChange={setCartMass} sliderClass="cm" accent="#64748b" />
                   <SliderRow label="m₂" sublabel="Pendulum mass" value={pendulumMass} displayValue={`${pendulumMass.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setPendulumMass} sliderClass="pm" accent="#818cf8" />
+                  <SliderRow label="L" sublabel="Pendulum length" value={pendulumLength} displayValue={`${pendulumLength.toFixed(2)} m`} min={0.2} max={2.0} step={0.05} onChange={setPendulumLength} sliderClass="pl" accent="#f472b6" />
+                  <SliderRow label="μ" sublabel="Track friction" value={trackFriction} displayValue={trackFriction.toFixed(2)} min={0} max={2} step={0.05} onChange={setTrackFriction} sliderClass="tf" accent="#64748b" />
                   <SliderRow label="b" sublabel="Air resistance" value={airResistance} displayValue={airResistance.toFixed(2)} min={0} max={2} step={0.05} onChange={setAirResistance} sliderClass="ar" accent="#2dd4bf" />
                   <SliderRow label="θ₀" sublabel="Initial angle" value={initialAngle * (180 / Math.PI)} displayValue={`${((initialAngle * 180) / Math.PI).toFixed(1)}°`} min={-180} max={180} step={1} onChange={(v) => setInitialAngle((v * Math.PI) / 180)} sliderClass="ia" accent="#fb923c" />
                 </div>
@@ -1097,6 +1082,7 @@ export default function Home() {
                 </p>
                 <div className="space-y-4">
                   <SliderRow label="wE" sublabel="Energy error" value={wE} displayValue={wE.toFixed(3)} min={0} max={1} step={0.005} onChange={setWE} sliderClass="we" accent="#a78bfa" />
+                  <SliderRow label="w↑" sublabel="Upright bonus" value={wUpright} displayValue={wUpright.toFixed(1)} min={0} max={20} step={0.5} onChange={setWUpright} sliderClass="wup" accent="#34d399" />
                   <SliderRow label="wθ" sublabel="Angle error" value={wTheta} displayValue={wTheta.toFixed(1)} min={0} max={50} step={0.5} onChange={setWTheta} sliderClass="wth" accent="#00b8d9" />
                   <SliderRow label="wθ̇" sublabel="Angular velocity" value={wDot} displayValue={wDot.toFixed(2)} min={0} max={10} step={0.1} onChange={setWDot} sliderClass="wdot" accent="#00b8d9" />
                   <SliderRow label="wx" sublabel="Position error" value={wx} displayValue={wx.toFixed(2)} min={0} max={10} step={0.1} onChange={setWx} sliderClass="wwx" accent="#10b981" />
