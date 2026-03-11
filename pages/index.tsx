@@ -449,6 +449,207 @@ export default function Home() {
     if (ppoRef.current?.isTrained) setPpoTrained(true);
   }, []);
 
+  // ── Export training graph as scientific diagram ─────────────────────────────
+  const handleExportGraph = useCallback(() => {
+    if (rewardHistory.length === 0) return;
+
+    const W = 1600, H = 900;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d")!;
+    const MONO = '"Courier New", monospace';
+
+    // ── Background
+    ctx.fillStyle = "#0a1628";
+    ctx.fillRect(0, 0, W, H);
+
+    // ── Plot area
+    const pad = { top: 80, right: 340, bottom: 70, left: 80 };
+    const pW = W - pad.left - pad.right;
+    const pH = H - pad.top - pad.bottom;
+
+    ctx.fillStyle = "#060e1c";
+    ctx.fillRect(pad.left, pad.top, pW, pH);
+
+    // ── Title
+    ctx.fillStyle = "#c8dce8";
+    ctx.font = `bold 20px ${MONO}`;
+    ctx.textAlign = "left";
+    ctx.fillText("PPO Training — Episode Reward vs Update", pad.left, 36);
+
+    ctx.fillStyle = "#4a7898";
+    ctx.font = `12px ${MONO}`;
+    ctx.fillText(`Continuous Gaussian Policy · Fmax = 50 N · ${rewardHistory.length} updates · ${((trainingInfo?.totalSteps ?? 0) / 1000).toFixed(1)}k steps`, pad.left, 58);
+
+    // ── Data ranges
+    const data = rewardHistory;
+    const minX = data[0].time;
+    const maxX = data[data.length - 1].time;
+    const rangeX = maxX - minX || 1;
+    const minY = 0, maxY = 500;
+    const rangeY = maxY - minY;
+
+    const toX = (v: number) => pad.left + ((v - minX) / rangeX) * pW;
+    const toY = (v: number) => pad.top + pH - ((v - minY) / rangeY) * pH;
+
+    // ── Grid
+    ctx.strokeStyle = "#0e2442";
+    ctx.lineWidth = 0.5;
+    const nXmaj = 10, nYmaj = 10;
+    for (let i = 0; i <= nXmaj; i++) {
+      const x = pad.left + (pW * i) / nXmaj;
+      ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + pH); ctx.stroke();
+    }
+    for (let i = 0; i <= nYmaj; i++) {
+      const y = pad.top + (pH * i) / nYmaj;
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + pW, y); ctx.stroke();
+    }
+
+    // ── Plot border
+    ctx.strokeStyle = "#1e3d60";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad.left, pad.top, pW, pH);
+
+    // ── Y-axis labels
+    ctx.fillStyle = "#4a7898";
+    ctx.font = `11px ${MONO}`;
+    ctx.textAlign = "right";
+    for (let i = 0; i <= nYmaj; i++) {
+      const v = maxY - (rangeY * i) / nYmaj;
+      const y = pad.top + (pH * i) / nYmaj;
+      ctx.fillText(v.toFixed(0), pad.left - 10, y + 4);
+    }
+
+    // ── X-axis labels
+    ctx.textAlign = "center";
+    for (let i = 0; i <= nXmaj; i++) {
+      const v = minX + (rangeX * i) / nXmaj;
+      const x = pad.left + (pW * i) / nXmaj;
+      ctx.fillText(v.toFixed(0), x, pad.top + pH + 20);
+    }
+
+    // ── Axis titles
+    ctx.fillStyle = "#6a9ab8";
+    ctx.font = `13px ${MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText("Update", pad.left + pW / 2, H - 16);
+    ctx.save();
+    ctx.translate(20, pad.top + pH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Episode Reward", 0, 0);
+    ctx.restore();
+
+    // ── Data line (glow + crisp)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.left, pad.top, pW, pH);
+    ctx.clip();
+
+    // Glow
+    ctx.shadowColor = "#10b981";
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = "#10b98155";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    data.forEach((pt, i) => {
+      const x = toX(pt.time), y = toY(pt.value);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Crisp
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    data.forEach((pt, i) => {
+      const x = toX(pt.time), y = toY(pt.value);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+
+    // ── Parameters panel (right side)
+    const panelX = W - pad.right + 30;
+    const panelW = pad.right - 50;
+
+    ctx.fillStyle = "#0d1f35";
+    ctx.strokeStyle = "#1a3858";
+    ctx.lineWidth = 1;
+    ctx.fillRect(panelX, pad.top, panelW, pH);
+    ctx.strokeRect(panelX, pad.top, panelW, pH);
+
+    let row = pad.top + 28;
+    const drawSection = (title: string) => {
+      ctx.fillStyle = "#6a9ab8";
+      ctx.font = `bold 11px ${MONO}`;
+      ctx.textAlign = "left";
+      ctx.fillText(title, panelX + 14, row);
+      row += 6;
+      // underline
+      ctx.strokeStyle = "#1a3858";
+      ctx.beginPath(); ctx.moveTo(panelX + 14, row); ctx.lineTo(panelX + panelW - 14, row); ctx.stroke();
+      row += 16;
+    };
+
+    const drawParam = (label: string, value: string) => {
+      ctx.fillStyle = "#4a7898";
+      ctx.font = `11px ${MONO}`;
+      ctx.textAlign = "left";
+      ctx.fillText(label, panelX + 14, row);
+      ctx.fillStyle = "#c8dce8";
+      ctx.textAlign = "right";
+      ctx.fillText(value, panelX + panelW - 14, row);
+      row += 20;
+    };
+
+    drawSection("HYPERPARAMETERS");
+    drawParam("Learning Rate", ppoLr.toExponential(1));
+    drawParam("Gamma (γ)", ppoGamma.toFixed(3));
+    drawParam("Clip Ratio (ε)", ppoClipRatio.toFixed(2));
+    drawParam("Entropy Coeff", ppoEntropyCoeff.toFixed(4));
+    drawParam("VF Coeff", ppoVfCoef.toFixed(2));
+    drawParam("Batch Size", `${ppoRef.current?.hp.batchSize ?? 2048}`);
+    drawParam("Epochs", `${ppoRef.current?.hp.epochs ?? 10}`);
+    drawParam("Mini-batch", `${ppoRef.current?.hp.miniBatchSize ?? 64}`);
+    drawParam("Max Grad Norm", `${ppoRef.current?.hp.maxGradNorm ?? 0.5}`);
+
+    row += 8;
+    drawSection("PHYSICS");
+    drawParam("Cart Mass", `${cartMass.toFixed(2)} kg`);
+    drawParam("Pendulum Mass", `${pendulumMass.toFixed(2)} kg`);
+    drawParam("Pendulum Length", `${pendulumLength.toFixed(2)} m`);
+    drawParam("Track Friction", `${trackFriction.toFixed(2)}`);
+    drawParam("Air Resistance", `${airResistance.toFixed(3)}`);
+
+    row += 8;
+    drawSection("RESULTS");
+    if (trainingInfo) {
+      drawParam("Total Steps", `${(trainingInfo.totalSteps / 1000).toFixed(1)}k`);
+      drawParam("Updates", `${trainingInfo.updateCount}`);
+      drawParam("Final Ep Reward", `${trainingInfo.meanReward.toFixed(1)}`);
+      drawParam("Policy Loss", `${trainingInfo.policyLoss.toFixed(4)}`);
+      drawParam("Value Loss", `${trainingInfo.valueLoss.toFixed(3)}`);
+      drawParam("Entropy", `${trainingInfo.entropy.toFixed(3)}`);
+    }
+
+    // ── Footer
+    ctx.fillStyle = "#2a4a6a";
+    ctx.font = `10px ${MONO}`;
+    ctx.textAlign = "left";
+    ctx.fillText("Inverted Pendulum · PPO Continuous · cameron-rlc", pad.left, H - 4);
+    ctx.textAlign = "right";
+    ctx.fillText(new Date().toISOString().split("T")[0], W - 20, H - 4);
+
+    // ── Download
+    const link = document.createElement("a");
+    link.download = `ppo-training-${Date.now()}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  }, [rewardHistory, trainingInfo, ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff, ppoVfCoef, cartMass, pendulumMass, pendulumLength, trackFriction, airResistance]);
+
   // ── Cleanup on unmount ──────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
@@ -922,7 +1123,7 @@ export default function Home() {
         {rewardHistory.length > 0 && mode === "single" && (
           <div style={{ border: "1px solid #1a3858", background: "#050d1a", overflow: "hidden" }}>
             <div
-              className="flex items-center px-4 py-2"
+              className="flex items-center justify-between px-4 py-2"
               style={{ borderBottom: "1px solid #142840", background: "#060d1c" }}
             >
               <span
@@ -931,6 +1132,20 @@ export default function Home() {
               >
                 CHANNEL 3  ·  PPO TRAINING PROGRESS
               </span>
+              <button
+                onClick={handleExportGraph}
+                className="text-[9px] font-mono tracking-wider px-3 py-1 cursor-pointer"
+                style={{
+                  color: "#6a9ab8",
+                  background: "#0a1e30",
+                  border: "1px solid #1a3858",
+                  transition: "all 0.15s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#142840"; e.currentTarget.style.color = "#c8dce8"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "#0a1e30"; e.currentTarget.style.color = "#6a9ab8"; }}
+              >
+                EXPORT PNG
+              </button>
             </div>
             <LiveGraph
               data={rewardHistory}
