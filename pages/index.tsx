@@ -3,6 +3,7 @@ import { InvertedPendulum } from "@/lib/InvertedPendulum";
 import type { IController } from "@/lib/controllers/IController";
 import { PIDController } from "@/lib/controllers/PIDController";
 import { PPOController, type TrainingInfo } from "@/lib/controllers/PPOController";
+import { PIPPODRController, type PIPPODRTrainingInfo } from "@/lib/controllers/PIPPODRController";
 import { DoublePendulum } from "@/lib/DoublePendulum";
 import PendulumCanvas from "@/components/PendulumCanvas";
 import DoublePendulumCanvas from "@/components/DoublePendulumCanvas";
@@ -261,7 +262,7 @@ function StatusLED({ active, label }: { active: boolean; label: string }) {
 /* ─── Main component ───────────────────────────────────────────────────────── */
 
 type Mode = "single" | "double";
-type ControllerType = "pid" | "ppo";
+type ControllerType = "pid" | "ppo" | "pippodr";
 
 export default function Home() {
   // ── Mode ────────────────────────────────────────────────────────────────────
@@ -274,6 +275,7 @@ export default function Home() {
   const pendulumRef = useRef<InvertedPendulum | null>(null);
   const controllerRef = useRef<IController | null>(null);
   const ppoRef = useRef<PPOController | null>(null);
+  const pippodrRef = useRef<PIPPODRController | null>(null);
 
   // ── Double-pendulum ref ─────────────────────────────────────────────────────
   const doublePendulumRef = useRef<DoublePendulum | null>(null);
@@ -302,6 +304,21 @@ export default function Home() {
   const [ppoTrained, setPpoTrained] = useState(false);
   const [trainingInfo, setTrainingInfo] = useState<TrainingInfo | null>(null);
   const [rewardHistory, setRewardHistory] = useState<{ time: number; value: number }[]>([]);
+
+  // ── PI-PPO-DR training state ────────────────────────────────────────────────
+  const [isTrainingPIPPODR, setIsTrainingPIPPODR] = useState(false);
+  const [pippodrTrained, setPippodrTrained] = useState(false);
+  const [pippodrTrainingInfo, setPippodrTrainingInfo] = useState<PIPPODRTrainingInfo | null>(null);
+  const [pippodrRewardHistory, setPippodrRewardHistory] = useState<{ time: number; value: number }[]>([]);
+  const [pippodrLoadedFile, setPippodrLoadedFile] = useState<{ name: string; sizeKb: number } | null>(null);
+
+  // ── PI-PPO-DR tunables ──────────────────────────────────────────────────────
+  const [wE, setWE] = useState(1.0);
+  const [wTheta, setWTheta] = useState(1.0);
+  const [wU, setWU] = useState(0.001);
+  const [wDeltaU, setWDeltaU] = useState(0.01);
+  const [thetaC, setThetaC] = useState(0.3);
+  const [drEnabled, setDrEnabled] = useState(true);
 
   // ── Physical parameters ─────────────────────────────────────────────────────
   const [cartMass, setCartMass] = useState(1.0);
@@ -348,8 +365,10 @@ export default function Home() {
     // Only set controller to PID if we're actually in PID mode
     if (controllerType === "pid") {
       controllerRef.current = new PIDController(kp, ki, kd);
-    } else if (ppoRef.current) {
+    } else if (controllerType === "ppo" && ppoRef.current) {
       controllerRef.current = ppoRef.current;
+    } else if (controllerType === "pippodr" && pippodrRef.current) {
+      controllerRef.current = pippodrRef.current;
     }
     setPendulumAngle(initialAngle);
     setAngleDisplay(initialAngle * (180 / Math.PI));
@@ -387,7 +406,7 @@ export default function Home() {
       setWallRestitution(0.75);
       setAirResistance(0.3);
       setInitialAngle((-63 * Math.PI) / 180);
-    } else {
+    } else if (controllerType === "ppo") {
       // Reuse existing PPO controller (preserves trained weights)
       if (!ppoRef.current) {
         ppoRef.current = new PPOController();
@@ -401,6 +420,20 @@ export default function Home() {
       setWallRestitution(0.5);
       setAirResistance(0.01);
       setInitialAngle(0.5);  // ~29° — clearly falls without a trained controller
+    } else {
+      // PI-PPO-DR — reuse existing controller (preserves trained weights)
+      if (!pippodrRef.current) {
+        pippodrRef.current = new PIPPODRController();
+      }
+      controllerRef.current = pippodrRef.current;
+      // Same physics nominal as the PPO env
+      setCartMass(1.0);
+      setPendulumMass(0.1);
+      setPendulumLength(1.0);
+      setTrackFriction(0.1);
+      setWallRestitution(0.5);
+      setAirResistance(0.01);
+      setInitialAngle(0.5);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controllerType]);
@@ -415,6 +448,18 @@ export default function Home() {
       ppoRef.current.hp.vfCoef = ppoVfCoef;
     }
   }, [ppoLr, ppoGamma, ppoClipRatio, ppoEntropyCoeff, ppoVfCoef]);
+
+  // ── Sync PI-PPO-DR reward weights and DR toggle live ───────────────────────
+  useEffect(() => {
+    if (pippodrRef.current) {
+      pippodrRef.current.rewardWeights.wE = wE;
+      pippodrRef.current.rewardWeights.wTheta = wTheta;
+      pippodrRef.current.rewardWeights.wU = wU;
+      pippodrRef.current.rewardWeights.wDeltaU = wDeltaU;
+      pippodrRef.current.rewardWeights.thetaC = thetaC;
+      pippodrRef.current.drConfig.enabled = drEnabled;
+    }
+  }, [wE, wTheta, wU, wDeltaU, thetaC, drEnabled]);
 
   // ── PPO training handlers ───────────────────────────────────────────────────
   const handleStartTraining = useCallback(() => {
@@ -447,6 +492,54 @@ export default function Home() {
     ppoRef.current?.stopTraining();
     setIsTrainingPPO(false);
     if (ppoRef.current?.isTrained) setPpoTrained(true);
+  }, []);
+
+  // ── PI-PPO-DR training handlers ─────────────────────────────────────────────
+  const handleStartTrainingPIPPODR = useCallback(() => {
+    if (!pippodrRef.current) {
+      pippodrRef.current = new PIPPODRController();
+      controllerRef.current = pippodrRef.current;
+    }
+    setIsTrainingPIPPODR(true);
+    setPippodrRewardHistory([]);
+    pippodrRef.current
+      .train((info) => {
+        setPippodrTrainingInfo({ ...info });
+        setPippodrRewardHistory((prev) => [...prev, { time: info.updateCount, value: info.meanReward }]);
+      })
+      .then(() => {
+        setIsTrainingPIPPODR(false);
+        setPippodrTrained(true);
+      });
+  }, []);
+
+  const handleStopTrainingPIPPODR = useCallback(() => {
+    pippodrRef.current?.stopTraining();
+    setIsTrainingPIPPODR(false);
+    if (pippodrRef.current?.isTrained) setPippodrTrained(true);
+  }, []);
+
+  const handleLoadPIPPODRWeights = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const payload = JSON.parse(String(reader.result));
+        if (!pippodrRef.current) {
+          pippodrRef.current = new PIPPODRController();
+          controllerRef.current = pippodrRef.current;
+        }
+        pippodrRef.current.loadWeights(payload);
+        pippodrRef.current.reset();
+        setPippodrTrained(true);
+        setPippodrTrainingInfo(null);
+        setPippodrRewardHistory([]);
+        setPippodrLoadedFile({ name: file.name, sizeKb: file.size / 1024 });
+      } catch (e) {
+        setPippodrLoadedFile(null);
+        alert(`Failed to load weights: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    reader.readAsText(file);
   }, []);
 
   // ── Export training graph as scientific diagram ─────────────────────────────
@@ -864,8 +957,16 @@ export default function Home() {
     mode === "single"
       ? controllerType === "pid"
         ? "PID CONTROLLER v2.0"
-        : "PPO · Neural Policy"
+        : controllerType === "ppo"
+          ? "PPO · Neural Policy"
+          : "PI-PPO-DR · Physics-Informed Policy"
       : "FREE DYNAMICS";
+
+  const pippodrStatusText = isTrainingPIPPODR
+    ? `> Training · update ${pippodrTrainingInfo?.updateCount ?? 0} · ${((pippodrTrainingInfo?.totalSteps ?? 0) / 1000).toFixed(1)}k steps`
+    : pippodrTrained
+      ? "> Policy trained · using learned weights (mean action)"
+      : "> Untrained · random weights · train before deploying";
 
   return (
     <div
@@ -943,6 +1044,9 @@ export default function Home() {
           {mode === "single" && controllerType === "ppo" && (
             <StatusLED active={isTrainingPPO} label="Training" />
           )}
+          {mode === "single" && controllerType === "pippodr" && (
+            <StatusLED active={isTrainingPIPPODR} label="Training" />
+          )}
           <div className="h-4 w-px" style={{ background: "#0e2035" }} />
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
             {ctrlLabel}
@@ -997,9 +1101,11 @@ export default function Home() {
                 ? "> no controller  ·  free chaotic dynamics  ·  elastic wall bounce"
                 : controllerType === "ppo"
                   ? ppoStatusText
-                  : controllerEnabled
-                    ? "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
-                    : "> controller OFF  ·  open-loop  ·  free fall under gravity"}
+                  : controllerType === "pippodr"
+                    ? pippodrStatusText
+                    : controllerEnabled
+                      ? "> PID active  ·  target θ = 0.000°  ·  tuning via gains below"
+                      : "> controller OFF  ·  open-loop  ·  free fall under gravity"}
             </p>
           </div>
         </div>
@@ -1204,6 +1310,19 @@ export default function Home() {
                   >
                     PPO
                   </button>
+                  <button
+                    onClick={() => setControllerType("pippodr")}
+                    className="flex-1 py-1.5 text-[9px] font-mono tracking-widest uppercase transition-all"
+                    style={{
+                      background: controllerType === "pippodr" ? "#0e2a1c" : "transparent",
+                      color: controllerType === "pippodr" ? "#10b981" : "#4a7898",
+                      border: controllerType === "pippodr" ? "1px solid #10b981" : "1px solid transparent",
+                      borderRadius: 3,
+                      cursor: "pointer",
+                    }}
+                  >
+                    PI-PPO-DR
+                  </button>
                 </div>
               </div>
 
@@ -1227,7 +1346,7 @@ export default function Home() {
                     <SliderRow label="Kd" sublabel="Derivative" value={kd} displayValue={kd.toString()} min={0} max={100} step={1} onChange={setKd} disabled={!controllerEnabled} sliderClass="kd" accent="#10b981" />
                   </div>
                 </div>
-              ) : (
+              ) : controllerType === "ppo" ? (
                 /* ── PPO Training controls ─────────────────────────────── */
                 <div>
                   <SectionHeader label="PPO Training" />
@@ -1301,6 +1420,107 @@ export default function Home() {
                     </p>
                   </div>
                 </div>
+              ) : (
+                /* ── PI-PPO-DR Training controls ───────────────────────── */
+                <div>
+                  <SectionHeader label="PI-PPO-DR Training" />
+
+                  <div className="flex items-center gap-3 mb-3">
+                    <StatusLED
+                      active={isTrainingPIPPODR}
+                      label={isTrainingPIPPODR ? "Training" : pippodrTrained ? "Trained" : "Untrained"}
+                    />
+                  </div>
+
+                  {pippodrTrainingInfo && (
+                    <div className="grid grid-cols-2 gap-1.5 mb-4">
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Updates</div>
+                        <div className="text-base font-mono tabular-nums font-medium" style={{ color: "#10b981" }}>{pippodrTrainingInfo.updateCount}</div>
+                      </div>
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Steps</div>
+                        <div className="text-base font-mono tabular-nums font-medium" style={{ color: "#10b981" }}>{(pippodrTrainingInfo.totalSteps / 1000).toFixed(1)}k</div>
+                      </div>
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Ep Reward</div>
+                        <div
+                          className="text-base font-mono tabular-nums font-medium"
+                          style={{ color: pippodrTrainingInfo.meanReward > -50 ? "#10b981" : "#ef4444" }}
+                        >
+                          {pippodrTrainingInfo.meanReward.toFixed(1)}
+                        </div>
+                      </div>
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Entropy</div>
+                        <div className="text-base font-mono tabular-nums font-medium" style={{ color: "#00b8d9" }}>{pippodrTrainingInfo.entropy.toFixed(3)}</div>
+                      </div>
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Policy Loss</div>
+                        <div className="text-base font-mono tabular-nums font-medium" style={{ color: "#f59e0b" }}>{pippodrTrainingInfo.policyLoss.toFixed(4)}</div>
+                      </div>
+                      <div className="px-3 py-2" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                        <div className="text-[8px] font-mono uppercase" style={{ color: "#4a7898" }}>Value Loss</div>
+                        <div className="text-base font-mono tabular-nums font-medium" style={{ color: "#f59e0b" }}>{pippodrTrainingInfo.valueLoss.toFixed(3)}</div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <EngButton
+                      onClick={handleStartTrainingPIPPODR}
+                      disabled={isTrainingPIPPODR}
+                      variant="active"
+                    >
+                      Train
+                    </EngButton>
+                    <EngButton
+                      onClick={handleStopTrainingPIPPODR}
+                      disabled={!isTrainingPIPPODR}
+                      variant="warn"
+                    >
+                      Stop
+                    </EngButton>
+                  </div>
+
+                  <label
+                    className={`block text-[9px] font-mono tracking-widest uppercase text-center py-1.5 mb-3 transition-all`}
+                    style={{
+                      border: pippodrLoadedFile ? "1px solid #10b981" : "1px dashed #1a3858",
+                      color: isTrainingPIPPODR ? "#3a6080" : "#10b981",
+                      background: pippodrLoadedFile ? "#0e2a1c" : "#06101e",
+                      cursor: isTrainingPIPPODR ? "not-allowed" : "pointer",
+                      borderRadius: 3,
+                    }}
+                  >
+                    {pippodrLoadedFile
+                      ? `✓ ${pippodrLoadedFile.name} · ${pippodrLoadedFile.sizeKb.toFixed(1)} kB · replace`
+                      : "Load weights JSON"}
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      style={{ display: "none" }}
+                      disabled={isTrainingPIPPODR}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleLoadPIPPODRWeights(f);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+
+                  <div className="p-3" style={{ background: "#06101e", border: "1px solid #0a1e30" }}>
+                    <p className="text-[9px] font-mono leading-relaxed" style={{ color: "#3a6080" }}>
+                      {isTrainingPIPPODR
+                        ? "> PI-PPO-DR updates running in background"
+                        : pippodrLoadedFile
+                          ? `> Loaded ${pippodrLoadedFile.name} · run simulation to use policy`
+                          : pippodrTrained
+                            ? "> Ready · run simulation to use policy"
+                            : "> Skeleton clone of PPO · Train → Run simulation"}
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
           ) : (
@@ -1335,7 +1555,7 @@ export default function Home() {
                 <div className="mt-6">
                   <SectionHeader label="Training Hyper-parameters" />
                   <p className="text-[9px] font-mono mb-4 -mt-3" style={{ color: "#3a6080" }}>
-                    Discrete actions · +1 reward/step · CartPole-v1 style
+                    Continuous Gaussian policy · +1 reward/step · CartPole-v1 style
                   </p>
                   <div className="space-y-4">
                     <SliderRow label="lr" sublabel="Learning rate" value={ppoLr * 10000} displayValue={`${(ppoLr * 10000).toFixed(1)}e-4`} min={0.5} max={10} step={0.5} onChange={(v) => setPpoLr(v / 10000)} sliderClass="plr" accent="#a78bfa" disabled={isTrainingPPO} />
@@ -1343,6 +1563,47 @@ export default function Home() {
                     <SliderRow label="ε" sublabel="Clip ratio" value={ppoClipRatio} displayValue={ppoClipRatio.toFixed(2)} min={0.05} max={0.5} step={0.01} onChange={setPpoClipRatio} sliderClass="pcr" accent="#a78bfa" disabled={isTrainingPPO} />
                     <SliderRow label="c_vf" sublabel="Value loss coeff" value={ppoVfCoef} displayValue={ppoVfCoef.toFixed(2)} min={0.1} max={1.0} step={0.05} onChange={setPpoVfCoef} sliderClass="pvf" accent="#a78bfa" disabled={isTrainingPPO} />
                     <SliderRow label="c_ent" sublabel="Entropy coeff" value={ppoEntropyCoeff} displayValue={ppoEntropyCoeff.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setPpoEntropyCoeff} sliderClass="pec" accent="#a78bfa" disabled={isTrainingPPO} />
+                  </div>
+                </div>
+              )}
+
+              {controllerType === "pippodr" && (
+                <div className="mt-6">
+                  <SectionHeader label="PI Reward Weights" />
+                  <p className="text-[9px] font-mono mb-4 -mt-3" style={{ color: "#3a6080" }}>
+                    Energy + precision + smoothness, α-blended by |θ|
+                  </p>
+                  <div className="space-y-4">
+                    <SliderRow label="w_E" sublabel="Energy term"          value={wE}      displayValue={wE.toFixed(2)}      min={0} max={5}    step={0.05} onChange={setWE}      sliderClass="pirwE"  accent="#10b981" disabled={isTrainingPIPPODR} />
+                    <SliderRow label="w_θ" sublabel="Angle² penalty"       value={wTheta}  displayValue={wTheta.toFixed(2)}  min={0} max={5}    step={0.05} onChange={setWTheta}  sliderClass="pirwT"  accent="#10b981" disabled={isTrainingPIPPODR} />
+                    <SliderRow label="w_u" sublabel="Effort² penalty"      value={wU}      displayValue={wU.toFixed(4)}      min={0} max={0.05} step={0.001} onChange={setWU}     sliderClass="pirwU"  accent="#10b981" disabled={isTrainingPIPPODR} />
+                    <SliderRow label="w_Δu" sublabel="Chatter (Δu²) penalty" value={wDeltaU} displayValue={wDeltaU.toFixed(3)} min={0} max={0.2}  step={0.001} onChange={setWDeltaU} sliderClass="pirwDu" accent="#10b981" disabled={isTrainingPIPPODR} />
+                    <SliderRow label="θ_c" sublabel="Blend knee (rad)"     value={thetaC}  displayValue={thetaC.toFixed(2)}  min={0.05} max={1.5} step={0.01} onChange={setThetaC} sliderClass="pirtc"  accent="#10b981" disabled={isTrainingPIPPODR} />
+                  </div>
+
+                  <div className="mt-5">
+                    <SectionHeader label="Domain Randomization" />
+                    <div className="flex items-center justify-between p-3" style={{ background: "#06101e", border: "1px solid #1a3858" }}>
+                      <div>
+                        <div className="text-[9px] font-mono uppercase tracking-widest" style={{ color: "#bdd0e4" }}>DR active</div>
+                        <div className="text-[8px] font-mono mt-1" style={{ color: "#4a7898" }}>Per-episode U-sampling of M_c, M_p, L, F_max, b</div>
+                      </div>
+                      <button
+                        onClick={() => setDrEnabled(!drEnabled)}
+                        disabled={isTrainingPIPPODR}
+                        className="text-[9px] font-mono tracking-widest uppercase px-3 py-1.5"
+                        style={{
+                          background: drEnabled ? "#0e2a1c" : "transparent",
+                          color: drEnabled ? "#10b981" : "#4a7898",
+                          border: drEnabled ? "1px solid #10b981" : "1px solid #1a3858",
+                          borderRadius: 3,
+                          cursor: isTrainingPIPPODR ? "not-allowed" : "pointer",
+                          opacity: isTrainingPIPPODR ? 0.5 : 1,
+                        }}
+                      >
+                        {drEnabled ? "ON" : "OFF"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1372,8 +1633,10 @@ export default function Home() {
           <span className="text-[9px] font-mono" style={{ color: "#3a6080" }}>
             {mode === "single"
               ? controllerType === "ppo"
-                ? "PPO · discrete {L,R} · actor 4→64→64→2 · critic 4→64→64→1 · GAE-λ · Adam"
-                : "g = 9.81 m/s² · L = 1.0 m · single pole"
+                ? "PPO · continuous Gaussian policy · actor 4→64→64→1 · critic 4→64→64→1 · GAE-λ · Adam"
+                : controllerType === "pippodr"
+                  ? "PI-PPO-DR · 5-dim augmented state · energy/precision/smooth reward · per-episode DR"
+                  : "g = 9.81 m/s² · L = 1.0 m · single pole"
               : "g = 9.81 m/s² · L = 5.0 m · double pole · no controller"}
           </span>
         </div>
