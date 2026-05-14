@@ -1,11 +1,24 @@
 # =============================================================================
 # PI-PPO-DR — Physics-Informed PPO with Domain Randomization
 #
-# Trains a continuous-action Gaussian policy for the inverted pendulum, with:
-#   • 5-dim augmented state [x, ẋ, θ, θ̇, u_{t-1}]
-#   • physics-informed reward (energy + precision + smoothness, α-blended)
-#   • broad-uniform global initial state (full circle swing-up)
-#   • per-episode domain randomization over physical parameters
+# Implementation of the framework in controller.pdf:
+#
+#   §2.1  Augmented observation
+#         s_t^aug = [x, ẋ, cos θ, sin θ, θ̇, ΔE, u_{t-1}]
+#
+#   §3    Continuous control via squashed Gaussian
+#         a_t ~ N(μ_θ(s), σ_θ(s)),    u_t = F_max · tanh(a_t)
+#
+#   §6/§7 Physics-informed reward with sigmoid α-blending
+#         α_t = σ(β(|θ_t| − θ_c)),    β = 10, θ_c = 0.30 rad
+#
+#   §4.1  Domain randomization over (M_c, M_p, L, b_c, b_p, K_m, τ_d) plus
+#         Gaussian sensor noise on x and θ. F_max is NOT randomized.
+#
+#   §5    Global initial state  θ₀ ∈ U(−π, π), x₀ ∈ U(−0.2, 0.2),
+#                                ẋ₀ ∈ U(−0.1, 0.1), θ̇₀ ∈ U(−0.5, 0.5)
+#
+#   §9    Termination |x_t| > 2.4 m   (no angle termination)
 #
 # The physics model is a faithful port of lib/InvertedPendulum.ts (RK4, friction,
 # air resistance, wall restitution, velocity caps, angle wrap) so that weights
@@ -21,7 +34,8 @@ import json
 import math
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 import numpy as np
 import torch
@@ -55,9 +69,10 @@ MAX_GRAD_NORM = 0.5
 LR = 3e-4
 EP_MAX_STEPS = 500
 DT = 0.02
-F_MAX_NOMINAL = 10.0      # nominal force magnitude (N)
+F_MAX = 10.0              # constant force magnitude (N) — §3 actuator limit
+STATE_DIM = 7             # augmented observation dimension (§2.1)
 
-# Reward-shaping weights (must match browser defaults in PIPPODRController.ts)
+# Reward-shaping weights (must match defaults in PIPPODRController.ts)
 W_E = 1.0
 W_THETA = 1.0
 W_THETA_DOT = 0.1
@@ -65,34 +80,54 @@ W_X = 0.05
 W_X_DOT = 0.01
 W_U = 0.001
 W_DELTA_U = 0.01
-THETA_C = 0.3
+THETA_C = 0.30            # blend knee (rad)        — §7
+BETA = 10.0               # blend sigmoid slope     — §7
 
 # Physical constants
 G = 9.81
 
-# Domain randomization ranges — multiplicative around nominal, U(lo, hi)
+# ── Domain randomization (§4.1 / Table 1) ────────────────────────────────────
 @dataclass
-class DRRange:
+class DRRangeMul:
+    """Multiplicative DR: sample = nominal · U(lo, hi)."""
     nominal: float
     lo: float
     hi: float
 
+@dataclass
+class DRRangeAbs:
+    """Absolute DR: sample = U(lo, hi)."""
+    lo: float
+    hi: float
+
 DR = {
-    "Mc":   DRRange(1.0,  0.75, 1.25),
-    "Mp":   DRRange(0.1,  0.75, 1.25),
-    "L":    DRRange(1.0,  0.80, 1.20),   # nominal aligned with browser simulator default
-    "Fmax": DRRange(F_MAX_NOMINAL, 0.90, 1.10),
-    "b":    DRRange(0.1,  0.70, 1.30),
+    "Mc":     DRRangeMul(nominal=1.0, lo=0.85, hi=1.15),
+    "Mp":     DRRangeMul(nominal=0.1, lo=0.85, hi=1.15),
+    "L":      DRRangeMul(nominal=0.5, lo=0.90, hi=1.10),
+    "bc":     DRRangeAbs(lo=0.05,  hi=0.15),       # cart friction       N·s/m
+    "bp":     DRRangeAbs(lo=0.005, hi=0.02),       # pendulum damping    N·m·s/rad
+    "Km":     DRRangeAbs(lo=0.90,  hi=1.10),       # motor gain          unitless
+    "tau_ms": DRRangeAbs(lo=10,    hi=30),         # actuator delay      ms
 }
+NOISE_THETA_STD = 0.01    # rad,  N(0, σ²)         — §4.1
+NOISE_X_STD     = 0.002   # m,    N(0, σ²)         — §4.1
 DR_ENABLED = True
 
+# Nominal physics used for observation-side ΔE normalization (kept fixed so the
+# energy signal lives on a stable physical scale across DR samples).
+MP_NOMINAL = DR["Mp"].nominal
+L_NOMINAL  = DR["L"].nominal
+E_SCALE    = 2 * MP_NOMINAL * G * L_NOMINAL    # ≈ 0.981 J
+
 # Fixed (non-DR) physics — matches InvertedPendulum.ts defaults
-AIR_RESISTANCE = 0.01
-RESTITUTION = 0.5
-MAX_CART_POSITION = 8.0   # track half-length
+# Anti reward-hacking: keep the wall just outside the termination boundary and
+# kill bounciness so the agent dies before it can ever touch a wall.
+RESTITUTION = 0.0
+MAX_CART_POSITION = 2.5   # track half-length (physical wall)
 MAX_CART_VEL = 10.0
 MAX_ANG_VEL = 20.0
-TERMINATE_X = 2.4         # episode ends if |x| > this (matches JS rollout)
+TERMINATE_X = 2.4         # episode ends if |x| > this (§9)
+CRASH_PENALTY = 1000.0    # subtracted from reward if the cart ever hits a wall
 
 
 # ── Cell 1 ── Physics (port of lib/InvertedPendulum.ts) ──────────────────────
@@ -100,14 +135,17 @@ TERMINATE_X = 2.4         # episode ends if |x| > this (matches JS rollout)
 class Pendulum:
     Mc: float = 1.0
     Mp: float = 0.1
-    L: float = 1.0
-    friction: float = 0.1
-    Fmax: float = F_MAX_NOMINAL
+    L: float = 0.5
+    bc: float = 0.10         # cart friction
+    bp: float = 0.01         # pendulum joint damping
+    Fmax: float = F_MAX
     # State
     x: float = 0.0
     xd: float = 0.0
     th: float = 0.0
     thd: float = 0.0
+    # True for one step whenever the cart was clamped against a wall.
+    at_boundary: bool = False
 
     def derivative(self, force: float, dt: float, k):
         """One RK4 stage. k = (dx, dv, dtheta, domega) from previous stage or None."""
@@ -124,7 +162,7 @@ class Pendulum:
         if abs(denom) < 1e-4:
             return (v, 0.0, omega, 0.0)
 
-        friction_force = self.friction * v + 0.01 * v * abs(v)
+        friction_force = self.bc * v + 0.01 * v * abs(v)
 
         cart_acc = (
             force - friction_force
@@ -132,7 +170,7 @@ class Pendulum:
             - self.Mp * G * s * c
         ) / denom
 
-        ang_damping = AIR_RESISTANCE * omega + 0.001 * omega * abs(omega)
+        ang_damping = self.bp * omega + 0.001 * omega * abs(omega)
         ang_acc = (
             -force * c + friction_force * c
             + total * G * s
@@ -163,72 +201,131 @@ class Pendulum:
             self.thd = math.copysign(MAX_ANG_VEL * 0.95, self.thd)
 
         # Wall collision (elastic with restitution)
+        self.at_boundary = False
         if abs(self.x) >= MAX_CART_POSITION:
             self.x = math.copysign(MAX_CART_POSITION, self.x)
             moving_into = self.xd * math.copysign(1.0, self.x) > 0
             if moving_into:
                 self.xd = -RESTITUTION * self.xd
+            self.at_boundary = True
 
         # Normalize angle to (-π, π]
         while self.th > math.pi:  self.th -= 2 * math.pi
         while self.th < -math.pi: self.th += 2 * math.pi
 
 
-def make_env() -> Pendulum:
-    """Domain-randomized + globally-initialized episode env."""
-    def sample(r: DRRange):
+# ── Per-episode bundle: plant + actuator dynamics + sensor noise σs ─────────
+@dataclass
+class Episode:
+    plant: Pendulum
+    Km: float = 1.0                          # motor gain
+    delay_steps: int = 0                     # actuator delay (in step units)
+    noise_theta_std: float = 0.0
+    noise_x_std: float = 0.0
+    _buf: List[float] = field(default_factory=list)
+
+    def __post_init__(self):
+        self._buf = [0.0] * self.delay_steps
+
+    def push_and_delay(self, u: float) -> float:
+        """FIFO actuator delay. Returns what actually reaches the plant."""
+        if self.delay_steps == 0:
+            return u
+        self._buf.append(u)
+        return self._buf.pop(0)
+
+
+def make_env() -> Episode:
+    """Domain-randomized + globally-initialized episode env (§4.1 + §5)."""
+    def mul(r: DRRangeMul) -> float:
         return r.nominal * (np.random.uniform(r.lo, r.hi) if DR_ENABLED else 1.0)
+    def absu(r: DRRangeAbs, fallback: float) -> float:
+        return float(np.random.uniform(r.lo, r.hi)) if DR_ENABLED else fallback
 
-    p = Pendulum(
-        Mc=sample(DR["Mc"]),
-        Mp=sample(DR["Mp"]),
-        L=sample(DR["L"]),
-        friction=sample(DR["b"]),
-        Fmax=sample(DR["Fmax"]),
+    Mc = mul(DR["Mc"])
+    Mp = mul(DR["Mp"])
+    L  = mul(DR["L"])
+    bc = absu(DR["bc"], 0.10)
+    bp = absu(DR["bp"], 0.01)
+    Km = absu(DR["Km"], 1.0)
+    tau_ms = absu(DR["tau_ms"], 0.0)
+
+    p = Pendulum(Mc=Mc, Mp=Mp, L=L, bc=bc, bp=bp, Fmax=F_MAX)
+    # §5 initial conditions
+    p.x   = float(np.random.uniform(-0.2, 0.2))
+    p.xd  = float(np.random.uniform(-0.1, 0.1))
+    p.th  = float(np.random.uniform(-math.pi, math.pi))
+    p.thd = float(np.random.uniform(-0.5, 0.5))
+
+    delay_steps = max(0, int(round(tau_ms / (DT * 1000))))
+
+    return Episode(
+        plant=p,
+        Km=Km,
+        delay_steps=delay_steps,
+        noise_theta_std=NOISE_THETA_STD if DR_ENABLED else 0.0,
+        noise_x_std=NOISE_X_STD if DR_ENABLED else 0.0,
     )
-    # Global init: full circle θ, broad x/ẋ/θ̇
-    p.x   = np.random.uniform(-1.0, 1.0)
-    p.xd  = np.random.uniform(-0.5, 0.5)
-    p.th  = np.random.uniform(-math.pi, math.pi)
-    p.thd = np.random.uniform(-1.0, 1.0)
-    return p
 
 
-# ── Cell 2 ── Reward (PI piece) ──────────────────────────────────────────────
-def compute_reward(p: Pendulum, action: float, prev_action: float) -> float:
+# ── Cell 2 ── Reward (PI piece, §6/§7) ──────────────────────────────────────
+def compute_reward(p: Pendulum, u: float, prev_u: float) -> float:
+    """
+    Physics-informed reward with sigmoid α-blending (§7.1).
+
+      α = σ(β(|θ| − θ_c))     so α → 1 for large |θ| (swing-up),
+                              α → 0 near upright (precision balance).
+    """
     th, thd, x, xd = p.th, p.thd, p.x, p.xd
 
     E = 0.5 * p.Mp * p.L**2 * thd * thd + p.Mp * G * p.L * (1 + math.cos(th))
     Eup = 2 * p.Mp * G * p.L
     dE = E - Eup
 
-    abs_th = abs(th)
-    alpha = abs_th / (abs_th + THETA_C)
+    alpha = 1.0 / (1.0 + math.exp(-BETA * (abs(th) - THETA_C)))
 
     r_energy = -alpha * W_E * dE * dE
-    r_prec = -(1 - alpha) * (W_THETA * th * th + W_THETA_DOT * thd * thd)
-    r_cart = -(W_X * x * x + W_X_DOT * xd * xd)
-    r_smooth = -(W_U * action * action + W_DELTA_U * (action - prev_action) ** 2)
+    r_prec   = -(1 - alpha) * (W_THETA * th * th + W_THETA_DOT * thd * thd)
+    r_cart   = -(W_X * x * x + W_X_DOT * xd * xd)
+    r_smooth = -(W_U * u * u + W_DELTA_U * (u - prev_u) ** 2)
 
     return r_energy + r_prec + r_cart + r_smooth
 
 
-def normalise(p: Pendulum, prev_action: float) -> np.ndarray:
-    """5-dim augmented state — must match PIPPODRController.normaliseState exactly."""
+def observe(p: Pendulum, prev_u: float, noise_th: float, noise_x: float) -> np.ndarray:
+    """
+    §2.1 augmented observation:
+        s_t^aug = [x, ẋ, cos θ, sin θ, θ̇, ΔE, u_{t-1}]
+    Sensor noise (Gaussian) is added to x and θ only.
+    Must match PIPPODRController.buildObservation exactly.
+    """
+    x_obs  = p.x  + (np.random.normal(0.0, noise_x)  if noise_x  > 0 else 0.0)
+    th_obs = p.th + (np.random.normal(0.0, noise_th) if noise_th > 0 else 0.0)
+
+    E_obs = 0.5 * p.Mp * p.L**2 * p.thd * p.thd + p.Mp * G * p.L * (1 + math.cos(th_obs))
+    Eup   = 2 * p.Mp * G * p.L
+    dE    = E_obs - Eup
+
     return np.array([
-        p.x  / 2.4,
-        p.xd / 5.0,
-        p.th / math.pi,
+        x_obs / 2.4,
+        p.xd  / 5.0,
+        math.cos(th_obs),
+        math.sin(th_obs),
         p.thd / 8.0,
-        prev_action / F_MAX_NOMINAL,
+        dE / E_SCALE,
+        prev_u / F_MAX,
     ], dtype=np.float32)
 
 
-# ── Cell 3 ── Actor-Critic (continuous Gaussian) ────────────────────────────
+# ── Cell 3 ── Actor-Critic (continuous Gaussian, tanh-squashed) ─────────────
 class ActorCritic(nn.Module):
-    """5 → 64 → 64 → 1 actor + critic, learnable scalar logStd. Mirrors SimpleMLP."""
+    """
+    7 → 64 → 64 → 1 actor + critic, learnable scalar logStd.
+    Actor outputs the *raw* Gaussian mean μ; the tanh squash + F_max scaling
+    happen outside the distribution so log-prob is on the raw sample a.
+    """
 
-    def __init__(self, state_dim: int = 5, hidden: int = 64):
+    def __init__(self, state_dim: int = STATE_DIM, hidden: int = 64):
         super().__init__()
         # Actor
         self.a1 = nn.Linear(state_dim, hidden)
@@ -238,7 +335,7 @@ class ActorCritic(nn.Module):
         self.c1 = nn.Linear(state_dim, hidden)
         self.c2 = nn.Linear(hidden, hidden)
         self.c3 = nn.Linear(hidden, 1)
-        # Learnable log-std
+        # Learnable log-std (raw, unscaled — squashing happens after sampling)
         self.log_std = nn.Parameter(torch.tensor(-0.5))
 
         self._init_weights()
@@ -255,20 +352,19 @@ class ActorCritic(nn.Module):
     def actor(self, x):
         h = torch.tanh(self.a1(x))
         h = torch.tanh(self.a2(h))
-        return self.a3(h).squeeze(-1)        # mu (raw, scale by Fmax outside)
+        return self.a3(h).squeeze(-1)        # raw μ
 
     def critic(self, x):
         h = torch.tanh(self.c1(x))
         h = torch.tanh(self.c2(h))
         return self.c3(h).squeeze(-1)
 
-    def get_action(self, s, action=None, fmax: float = F_MAX_NOMINAL):
-        mu_raw = self.actor(s)
-        mu = mu_raw * fmax
-        sigma = torch.exp(self.log_std) * fmax
+    def get_action(self, s, action=None):
+        mu = self.actor(s)
+        sigma = torch.exp(self.log_std).expand_as(mu)
         dist = Normal(mu, sigma)
         if action is None:
-            action = dist.sample()
+            action = dist.sample()           # raw a ~ N(μ, σ²)
         log_prob = dist.log_prob(action)
         entropy = dist.entropy()
         value = self.critic(s)
@@ -338,6 +434,7 @@ def ppo_update(model, optimizer, states, actions, old_log_probs, advantages, ret
 def train():
     print("=" * 70)
     print(f"  PI-PPO-DR Training  ·  device={DEVICE}  ·  DR={'on' if DR_ENABLED else 'off'}")
+    print(f"  state_dim={STATE_DIM}  F_max={F_MAX}  θ_c={THETA_C}  β={BETA}")
     print("=" * 70)
 
     model = ActorCritic().to(DEVICE)
@@ -345,15 +442,15 @@ def train():
 
     n_updates = TOTAL_TIMESTEPS // N_STEPS
 
-    buf_states = np.zeros((N_STEPS, 5), dtype=np.float32)
+    buf_states = np.zeros((N_STEPS, STATE_DIM), dtype=np.float32)
     buf_actions = np.zeros(N_STEPS, dtype=np.float32)
     buf_rewards = np.zeros(N_STEPS, dtype=np.float32)
     buf_dones = np.zeros(N_STEPS, dtype=np.float32)
     buf_values = np.zeros(N_STEPS, dtype=np.float32)
     buf_log_probs = np.zeros(N_STEPS, dtype=np.float32)
 
-    p = make_env()
-    prev_action = 0.0
+    ep = make_env()
+    prev_u = 0.0
     ep_steps = 0
     cur_ep_reward = 0.0
     ep_rewards = deque(maxlen=50)
@@ -369,54 +466,55 @@ def train():
         # ── Rollout ──
         for step in range(N_STEPS):
             global_step += 1
-            obs = normalise(p, prev_action)
+            obs = observe(ep.plant, prev_u, ep.noise_theta_std, ep.noise_x_std)
             s_t = torch.from_numpy(obs).unsqueeze(0).to(DEVICE)
 
             with torch.no_grad():
-                # Policy distribution uses the *constant* nominal F_max so the
-                # learned σ has a stable physical scale across episodes. The
-                # DR'd p.Fmax only affects the physics clamp.
-                a, lp, _, v = model.get_action(s_t, fmax=F_MAX_NOMINAL)
+                a, lp, _, v = model.get_action(s_t)
 
-            action = a.item()
-            # Browser-side controller clamps to its constant Fmax=10 first; the
-            # simulator then applies its own (DR-sampled) clamp internally.
-            clamped_ctrl = max(-F_MAX_NOMINAL, min(F_MAX_NOMINAL, action))
-            clamped = max(-p.Fmax, min(p.Fmax, clamped_ctrl))
+            a_raw = float(a.item())                              # raw Gaussian sample
+            u_cmd = F_MAX * math.tanh(a_raw)                     # §3 squash
+            u_gain = ep.Km * u_cmd                               # §4.1 motor gain
+            u_applied = ep.push_and_delay(u_gain)                # §4.1 actuator delay
 
-            buf_states[step] = obs
-            buf_actions[step] = action
-            buf_log_probs[step] = lp.item()
-            buf_values[step] = v.item()
+            buf_states[step]    = obs
+            buf_actions[step]   = a_raw
+            buf_log_probs[step] = float(lp.item())
+            buf_values[step]    = float(v.item())
 
-            # Step physics with the simulator-side-clamped action
-            p.step(clamped, DT)
+            # Step physics with the (gain-scaled, delayed) force.
+            ep.plant.step(u_applied, DT)
             ep_steps += 1
 
-            terminated = abs(p.x) > TERMINATE_X
+            terminated = abs(ep.plant.x) > TERMINATE_X
             truncated = ep_steps >= EP_MAX_STEPS
             done = terminated or truncated
 
-            # Reward / prev_action use the controller-side clamp (matches the
-            # browser, where prevAction is the value before the simulator's
-            # internal Fmax clamp).
-            reward = compute_reward(p, clamped_ctrl, prev_action)
+            # Reward uses what actually hit the plant (u_applied), so Km and
+            # delay leak into the smoothness gradient as well.
+            reward = compute_reward(ep.plant, u_applied, prev_u)
+            # Anti reward-hacking: heavy crash penalty if the cart touched the
+            # wall this step.  Combined with the wall sitting at 2.5 m and the
+            # termination boundary at 2.4 m, the agent learns the boundary is
+            # a hard "lose" — it can't bounce off the wall for free energy.
+            if ep.plant.at_boundary:
+                reward -= CRASH_PENALTY
             buf_rewards[step] = reward
             buf_dones[step] = float(done)
 
             cur_ep_reward += reward
-            prev_action = clamped_ctrl
+            prev_u = u_applied
 
             if done:
                 ep_rewards.append(cur_ep_reward)
                 cur_ep_reward = 0.0
                 ep_steps = 0
-                p = make_env()
-                prev_action = 0.0
+                ep = make_env()
+                prev_u = 0.0
 
         # ── GAE ──
         with torch.no_grad():
-            obs = normalise(p, prev_action)
+            obs = observe(ep.plant, prev_u, ep.noise_theta_std, ep.noise_x_std)
             next_v = model.critic(torch.from_numpy(obs).unsqueeze(0).to(DEVICE)).item()
         advantages, returns = compute_gae(buf_rewards, buf_values, buf_dones, next_v)
 
@@ -458,16 +556,27 @@ def export_weights(model: ActorCritic, path: str):
         "actor":  [layer(model.a1), layer(model.a2), layer(model.a3)],
         "critic": [layer(model.c1), layer(model.c2), layer(model.c3)],
         "logStd": float(model.log_std.detach().cpu().item()),
-        "Fmax":   F_MAX_NOMINAL,
+        "Fmax":   F_MAX,
         "meta": {
-            "stateDim": 5,
+            "stateDim": STATE_DIM,
             "hiddenDim": 64,
             "totalSteps": TOTAL_TIMESTEPS,
             "drEnabled": DR_ENABLED,
             "rewardWeights": {
                 "wE": W_E, "wTheta": W_THETA, "wThetaDot": W_THETA_DOT,
                 "wX": W_X, "wXDot": W_X_DOT, "wU": W_U, "wDeltaU": W_DELTA_U,
-                "thetaC": THETA_C,
+                "thetaC": THETA_C, "beta": BETA,
+            },
+            "drRanges": {
+                "Mc":     [DR["Mc"].nominal, DR["Mc"].lo, DR["Mc"].hi],
+                "Mp":     [DR["Mp"].nominal, DR["Mp"].lo, DR["Mp"].hi],
+                "L":      [DR["L"].nominal,  DR["L"].lo,  DR["L"].hi],
+                "bc":     [DR["bc"].lo,      DR["bc"].hi],
+                "bp":     [DR["bp"].lo,      DR["bp"].hi],
+                "Km":     [DR["Km"].lo,      DR["Km"].hi],
+                "tau_ms": [DR["tau_ms"].lo,  DR["tau_ms"].hi],
+                "noiseThetaStd": NOISE_THETA_STD,
+                "noiseXStd":     NOISE_X_STD,
             },
         },
     }
