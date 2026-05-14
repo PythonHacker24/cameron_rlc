@@ -72,36 +72,37 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
       graphDim: "#3a6080",
       graphLine: "#2e5e90",
     } : {
-      bg: "#ffffff",
-      bgInset: "#f8fafc",
-      gridMinor: "#f1f5f9",
-      gridMajor: "#e2e8f0",
-      axis: "#e2e8f0",
-      axisStrong: "#cbd5e1",
-      centerLine: "#94a3b8",
-      centerLabel: "#475569",
-      trackShadow: "#cbd5e1",
-      trackFill: "#e2e8f0",
-      trackTop: "#2563eb",
-      trackBottom: "#cbd5e1",
-      rulerTickMinor: "#cbd5e1",
-      rulerLabel: "#64748b",
-      slideFill: "#e2e8f0",
-      slideStroke: "#94a3b8",
-      slideChannel: "#cbd5e1",
-      stopFill: "#dbeafe",
-      cartFill: "#dbeafe",
-      cartStroke: "#2563eb",
-      cartInner: "#93c5fd",
-      cartCenter: "#cbd5e1",
-      bolt: "#94a3b8",
-      cartLabel: "#1d4ed8",
-      mountFill: "#bfdbfe",
+      // Light palette — strengthened for daylight visibility.
+      bg: "#f8fafc",            // slate-50 (was pure white — slight tint makes lines pop)
+      bgInset: "#eef2f7",
+      gridMinor: "#e2e8f0",     // slate-200 (was slate-100)
+      gridMajor: "#94a3b8",     // slate-400 (was slate-200)
+      axis: "#94a3b8",
+      axisStrong: "#475569",    // slate-600 — major axes
+      centerLine: "#475569",    // slate-600 — the centre datum dashes
+      centerLabel: "#1e293b",   // slate-800 — readable label
+      trackShadow: "#94a3b8",
+      trackFill: "#cbd5e1",     // slate-300 — track bed
+      trackTop: "#1d4ed8",      // blue-700
+      trackBottom: "#64748b",   // slate-500
+      rulerTickMinor: "#94a3b8",
+      rulerLabel: "#334155",    // slate-700 — strong, definitely readable
+      slideFill: "#cbd5e1",
+      slideStroke: "#475569",
+      slideChannel: "#94a3b8",
+      stopFill: "#bfdbfe",      // blue-200 — clearly visible end stops
+      cartFill: "#3b82f6",      // blue-500 fill (was pale blue-100 — cart should *read* as the focal object)
+      cartStroke: "#1e3a8a",    // blue-900 outline
+      cartInner: "#bfdbfe",     // blue-200 inner highlight
+      cartCenter: "#1e3a8a",
+      bolt: "#1e3a8a",
+      cartLabel: "#ffffff",     // white text on blue cart
+      mountFill: "#1d4ed8",
       bob: "#1d4ed8",
-      graphLabel: "#475569",
-      graphFaint: "#cbd5e1",
-      graphDim: "#94a3b8",
-      graphLine: "#2563eb",
+      graphLabel: "#334155",
+      graphFaint: "#94a3b8",
+      graphDim: "#475569",
+      graphLine: "#1d4ed8",
     };
 
 

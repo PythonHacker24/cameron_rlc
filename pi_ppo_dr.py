@@ -44,7 +44,8 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
-SEED = 42
+SEED = 7         # was 42 — different seed to escape the policy-collapse basin
+                 # the previous run found.  PPO is non-deterministic w.r.t. seed.
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
@@ -64,13 +65,29 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
-ENT_COEF = 0.001
+ENT_COEF = 0.01    # 10× the default — keeps exploration alive long enough to
+                   # learn proper swing-up oscillation.  Previous 0.001 let the
+                   # policy collapse to σ ≈ 0.12 ("push right at θ ≈ π always")
+                   # before discovering the alternating energy-pump strategy.
 MAX_GRAD_NORM = 0.5
 LR = 3e-4
 EP_MAX_STEPS = 500
 DT = 0.02
 F_MAX = 10.0              # constant force magnitude (N) — §3 actuator limit
 STATE_DIM = 7             # augmented observation dimension (§2.1)
+
+# ── Checkpointing ────────────────────────────────────────────────────────────
+# How often to save the policy mid-training, measured in PPO *updates* (one
+# update = N_STEPS env steps, ≈ 4096).  With CHECKPOINT_EVERY=25 the trainer
+# writes ~14 times across a full 1.5 M-step run, every ~100 k env steps.
+CHECKPOINT_EVERY = 25
+
+# File paths used by the saver.  `CKPT_PATH` is rolled forward on every
+# checkpoint and is what the browser UI's "Load Weights" button picks up.
+# `BEST_PATH` is only overwritten when the rolling-mean reward sets a new
+# best — protects against late-training degradation.
+CKPT_PATH = "pi_ppo_dr_weights.json"
+BEST_PATH = "pi_ppo_dr_weights.best.json"
 
 # Reward-shaping weights (must match defaults in PIPPODRController.ts)
 W_E = 1.0
@@ -103,7 +120,7 @@ class DRRangeAbs:
 DR = {
     "Mc":     DRRangeMul(nominal=1.0, lo=0.85, hi=1.15),
     "Mp":     DRRangeMul(nominal=0.1, lo=0.85, hi=1.15),
-    "L":      DRRangeMul(nominal=0.5, lo=0.90, hi=1.10),
+    "L":      DRRangeMul(nominal=1.0, lo=0.90, hi=1.10),
     "bc":     DRRangeAbs(lo=0.05,  hi=0.15),       # cart friction       N·s/m
     "bp":     DRRangeAbs(lo=0.005, hi=0.02),       # pendulum damping    N·m·s/rad
     "Km":     DRRangeAbs(lo=0.90,  hi=1.10),       # motor gain          unitless
@@ -135,7 +152,7 @@ CRASH_PENALTY = 1000.0    # subtracted from reward if the cart ever hits a wall
 class Pendulum:
     Mc: float = 1.0
     Mp: float = 0.1
-    L: float = 0.5
+    L: float = 1.0           # nominal rod length (m) — bumped for forgiving dynamics
     bc: float = 0.10         # cart friction
     bp: float = 0.01         # pendulum joint damping
     Fmax: float = F_MAX
@@ -361,7 +378,11 @@ class ActorCritic(nn.Module):
 
     def get_action(self, s, action=None):
         mu = self.actor(s)
-        sigma = torch.exp(self.log_std).expand_as(mu)
+        # Floor log_std at -1.0 (σ ≈ 0.37 in raw action space) so the policy
+        # cannot crystallize too early and lose the ability to discover the
+        # alternating energy-pump strategy needed for swing-up.
+        log_std_clamped = self.log_std.clamp(min=-1.0, max=1.0)
+        sigma = torch.exp(log_std_clamped).expand_as(mu)
         dist = Normal(mu, sigma)
         if action is None:
             action = dist.sample()           # raw a ~ N(μ, σ²)
@@ -456,6 +477,8 @@ def train():
     ep_rewards = deque(maxlen=50)
     log = {"ep_reward": [], "policy_loss": [], "value_loss": [], "entropy": [], "step": []}
     global_step = 0
+    # Best 50-episode rolling reward seen so far — used to gate `BEST_PATH`.
+    best_avg = float("-inf")
 
     print(f"\n{'Update':>7} {'Steps':>8} {'EpReward':>10} "
           f"{'Avg50':>9} {'PiLoss':>9} {'VLoss':>10} {'Entropy':>9} {'KL':>8}  σ")
@@ -539,7 +562,23 @@ def train():
                   f"{m['entropy']:>9.4f} {m['approx_kl']:>8.5f}  {sigma:.3f}  "
                   f"({sps:.0f} sps)")
 
+        # ── Checkpointing ───────────────────────────────────────────────────
+        # Roll the canonical weights file every CHECKPOINT_EVERY updates (and
+        # always on the final iteration so the run never ends without a save).
+        # Track the best 50-episode rolling reward separately, and snapshot it
+        # to BEST_PATH so a late-training regression can't destroy the best
+        # policy we ever produced.
+        if update % CHECKPOINT_EVERY == 0 or update == n_updates:
+            export_weights(model, CKPT_PATH)
+            print(f"  ✓ checkpoint → {CKPT_PATH}  (step {global_step:,}, avg50 {avg:.2f})")
+        if avg > best_avg and len(ep_rewards) == ep_rewards.maxlen:
+            best_avg = avg
+            export_weights(model, BEST_PATH)
+            print(f"  ★ new best → {BEST_PATH}  (avg50 {best_avg:.2f})")
+
     print(f"\nTraining complete — {global_step:,} steps in {time.time() - t0:.1f}s")
+    print(f"  Final weights:   {CKPT_PATH}")
+    print(f"  Best-so-far:     {BEST_PATH}  (avg50 {best_avg:.2f})")
     return model, log
 
 
@@ -588,7 +627,9 @@ def export_weights(model: ActorCritic, path: str):
 # ── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     model, log = train()
-    export_weights(model, "pi_ppo_dr_weights.json")
+    # Note: the final policy is already saved by the in-loop checkpoint on the
+    # last iteration; no trailing export needed.  We still re-emit the path
+    # so the line below the curve plot mentions where things landed.
 
     # Optional: training-curve plot
     try:

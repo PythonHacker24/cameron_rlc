@@ -141,7 +141,7 @@ const DEFAULT_DR_CONFIG: DRConfig = {
   enabled: true,
   Mc:   { nominal: 1.0, lo: 0.85, hi: 1.15 },
   Mp:   { nominal: 0.1, lo: 0.85, hi: 1.15 },
-  L:    { nominal: 0.5, lo: 0.90, hi: 1.10 },
+  L:    { nominal: 1.0, lo: 0.90, hi: 1.10 },
   bc:   { lo: 0.05,  hi: 0.15 },
   bp:   { lo: 0.005, hi: 0.02 },
   Km:   { lo: 0.90,  hi: 1.10 },

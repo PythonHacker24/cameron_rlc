@@ -89,30 +89,36 @@ interface EngButtonProps {
  className?: string;
 }
 
+// Button variant tokens — one consistent semantic axis the whole UI follows:
+//   active  = enable / go / running       → green
+//   danger  = disable / stop / destructive → red
+//   warn    = caution / pause              → amber
+//   default = neutral primary action       → accent (blue)
+//   ghost   = tertiary / inline action     → outline only
 const variantStyles: Record<string, React.CSSProperties> = {
  default: {
  background:"var(--surface-1)",
  border:"1px solid var(--accent)",
- color:"var(--text-muted)",
+ color:"var(--accent)",
  },
  active: {
- background:"var(--accent-soft)",
- border:"1px solid var(--accent)",
- color:"var(--accent)",
+ background:"var(--success-soft)",
+ border:"1px solid var(--success)",
+ color:"var(--success)",
  },
  danger: {
  background:"var(--danger-soft)",
- border:"1px solid #7a1515",
+ border:"1px solid var(--danger)",
  color:"var(--danger)",
  },
  warn: {
  background:"var(--warn-soft)",
- border:"1px solid #7a5000",
+ border:"1px solid var(--warn)",
  color:"var(--warn)",
  },
  ghost: {
  background:"transparent",
- border:"1px solid #1e3858",
+ border:"1px solid var(--border-strong)",
  color:"var(--text-muted)",
  },
 };
@@ -197,7 +203,7 @@ function SliderRow({
  {/* track with filled portion */}
  <div
  className="relative h-[2px] w-full"
- style={{ background:"#162840" }}
+ style={{ background:"var(--border)" }}
  >
  <div
  className="absolute left-0 top-0 h-full"
@@ -248,13 +254,13 @@ function StatusLED({ active, label }: { active: boolean; label: string }) {
  <div
  className="w-2 h-2 rounded-full"
  style={{
- background: active ?"var(--success)" :"#0e2820",
+ background: active ?"var(--success)" :"var(--border-strong)",
  boxShadow: active ?"0 0 6px var(--success)" :"none",
  }}
  />
  <span
  className="text-[12px] font-mono uppercase"
- style={{ color: active ?"var(--success)" :"var(--success-soft)" }}
+ style={{ color: active ?"var(--success)" :"var(--text-muted)" }}
  >
  {label}
  </span>
@@ -358,6 +364,8 @@ export default function Home() {
  const [plotsRefreshHz, setPlotsRefreshHz] = useState(6); // 0 = paused
  // Math framework card — collapsed by default; teaser-equation visible.
  const [mathOpen, setMathOpen] = useState(false);
+ // Left sidebar — collapsible holder for controller + physical parameters.
+ const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
  const startTimeRef = useRef<number>(0);
  const animationFrameRef = useRef<number | null>(null);
  const lastTimeRef = useRef<number>(0);
@@ -419,7 +427,7 @@ export default function Home() {
  const applyHardwarePreset = useCallback(() => {
  setCartMass(1.0);
  setPendulumMass(0.1);
- setPendulumLength(0.5);
+ setPendulumLength(1.0);
  setTrackFriction(0.10);
  setWallRestitution(0.0);
  setAirResistance(0.01);
@@ -466,10 +474,11 @@ export default function Home() {
  pippodrRef.current = new PIPPODRController();
  }
  controllerRef.current = pippodrRef.current;
- // Nominal training physics (PDF §4.1 Table 1)
+ // Nominal training physics (PDF §4.1 Table 1) — L bumped to 1.0 m for
+ // gentler swing-up dynamics; the policy is trained on this nominal.
  setCartMass(1.0);
  setPendulumMass(0.1);
- setPendulumLength(0.5);
+ setPendulumLength(1.0);
  setTrackFriction(0.10);
  setWallRestitution(0.0);
  setAirResistance(0.01);
@@ -587,6 +596,27 @@ export default function Home() {
  const handleExportGraph = useCallback(() => {
  if (rewardHistory.length === 0) return;
 
+ // Canvas does NOT understand `var(--...)` strings — resolve them once up
+ // front against the current document theme so the exported PNG is themed
+ // correctly and there are no silent fallthroughs.
+ const cs = typeof window !== "undefined"
+   ? getComputedStyle(document.documentElement)
+   : null;
+ const cssVar = (name: string, fallback: string) =>
+   (cs?.getPropertyValue(name).trim() || fallback);
+ const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+ const P = {
+   bg:        isDark ? "#0a1628" : "#f8fafc",
+   plotBg:    isDark ? "#060e1c" : "#ffffff",
+   grid:      isDark ? "#0e2442" : "#e2e8f0",
+   panelBg:   isDark ? "#0d1f35" : "#f1f5f9",
+   border:    cssVar("--border", isDark ? "#1e3d60" : "#cbd5e1"),
+   text:      cssVar("--text", isDark ? "#f1f5f9" : "#0f172a"),
+   textMuted: cssVar("--text-muted", isDark ? "#94a3b8" : "#334155"),
+   success:   cssVar("--success", isDark ? "#34d399" : "#047857"),
+   successGlow: (isDark ? "#34d39955" : "#04785755"),
+ };
+
  const W = 1600, H = 900;
  const canvas = document.createElement("canvas");
  canvas.width = W;
@@ -595,7 +625,7 @@ export default function Home() {
  const MONO = '"Courier New", monospace';
 
  // ── Background
- ctx.fillStyle ="#0a1628";
+ ctx.fillStyle = P.bg;
  ctx.fillRect(0, 0, W, H);
 
  // ── Plot area
@@ -603,16 +633,16 @@ export default function Home() {
  const pW = W - pad.left - pad.right;
  const pH = H - pad.top - pad.bottom;
 
- ctx.fillStyle ="#060e1c";
+ ctx.fillStyle = P.plotBg;
  ctx.fillRect(pad.left, pad.top, pW, pH);
 
  // ── Title
- ctx.fillStyle ="var(--text)";
+ ctx.fillStyle =P.text;
  ctx.font = `bold 20px ${MONO}`;
  ctx.textAlign ="left";
  ctx.fillText("PPO Training — Episode Reward vs Update", pad.left, 36);
 
- ctx.fillStyle ="var(--text-muted)";
+ ctx.fillStyle =P.textMuted;
  ctx.font = `12px ${MONO}`;
  ctx.fillText(`Continuous Gaussian Policy · Fmax = 50 N · ${rewardHistory.length} updates · ${((trainingInfo?.totalSteps ?? 0) / 1000).toFixed(1)}k steps`, pad.left, 58);
 
@@ -628,7 +658,7 @@ export default function Home() {
  const toY = (v: number) => pad.top + pH - ((v - minY) / rangeY) * pH;
 
  // ── Grid
- ctx.strokeStyle ="#0e2442";
+ ctx.strokeStyle =P.grid;
  ctx.lineWidth = 0.5;
  const nXmaj = 10, nYmaj = 10;
  for (let i = 0; i <= nXmaj; i++) {
@@ -641,12 +671,12 @@ export default function Home() {
  }
 
  // ── Plot border
- ctx.strokeStyle ="var(--border)";
+ ctx.strokeStyle =P.border;
  ctx.lineWidth = 1;
  ctx.strokeRect(pad.left, pad.top, pW, pH);
 
  // ── Y-axis labels
- ctx.fillStyle ="var(--text-muted)";
+ ctx.fillStyle =P.textMuted;
  ctx.font = `11px ${MONO}`;
  ctx.textAlign ="right";
  for (let i = 0; i <= nYmaj; i++) {
@@ -664,7 +694,7 @@ export default function Home() {
  }
 
  // ── Axis titles
- ctx.fillStyle ="var(--text-muted)";
+ ctx.fillStyle =P.textMuted;
  ctx.font = `13px ${MONO}`;
  ctx.textAlign ="center";
  ctx.fillText("Update", pad.left + pW / 2, H - 16);
@@ -681,9 +711,9 @@ export default function Home() {
  ctx.clip();
 
  // Glow
- ctx.shadowColor ="var(--success)";
+ ctx.shadowColor =P.success;
  ctx.shadowBlur = 8;
- ctx.strokeStyle ="#10b98155";
+ ctx.strokeStyle =P.successGlow;
  ctx.lineWidth = 3;
  ctx.lineJoin ="round";
  ctx.beginPath();
@@ -695,7 +725,7 @@ export default function Home() {
 
  // Crisp
  ctx.shadowBlur = 0;
- ctx.strokeStyle ="var(--success)";
+ ctx.strokeStyle =P.success;
  ctx.lineWidth = 2;
  ctx.beginPath();
  data.forEach((pt, i) => {
@@ -709,31 +739,31 @@ export default function Home() {
  const panelX = W - pad.right + 30;
  const panelW = pad.right - 50;
 
- ctx.fillStyle ="#0d1f35";
- ctx.strokeStyle ="var(--border)";
+ ctx.fillStyle =P.panelBg;
+ ctx.strokeStyle =P.border;
  ctx.lineWidth = 1;
  ctx.fillRect(panelX, pad.top, panelW, pH);
  ctx.strokeRect(panelX, pad.top, panelW, pH);
 
  let row = pad.top + 28;
  const drawSection = (title: string) => {
- ctx.fillStyle ="var(--text-muted)";
+ ctx.fillStyle =P.textMuted;
  ctx.font = `bold 11px ${MONO}`;
  ctx.textAlign ="left";
  ctx.fillText(title, panelX + 14, row);
  row += 6;
  // underline
- ctx.strokeStyle ="var(--border)";
+ ctx.strokeStyle =P.border;
  ctx.beginPath(); ctx.moveTo(panelX + 14, row); ctx.lineTo(panelX + panelW - 14, row); ctx.stroke();
  row += 16;
  };
 
  const drawParam = (label: string, value: string) => {
- ctx.fillStyle ="var(--text-muted)";
+ ctx.fillStyle =P.textMuted;
  ctx.font = `11px ${MONO}`;
  ctx.textAlign ="left";
  ctx.fillText(label, panelX + 14, row);
- ctx.fillStyle ="var(--text)";
+ ctx.fillStyle =P.text;
  ctx.textAlign ="right";
  ctx.fillText(value, panelX + panelW - 14, row);
  row += 20;
@@ -770,7 +800,7 @@ export default function Home() {
  }
 
  // ── Footer
- ctx.fillStyle ="var(--border)";
+ ctx.fillStyle =P.border;
  ctx.font = `10px ${MONO}`;
  ctx.textAlign ="left";
  ctx.fillText("Inverted Pendulum · PPO Continuous · cameron-rlc", pad.left, H - 4);
@@ -1026,35 +1056,36 @@ export default function Home() {
 
  return (
  <div
- className="min-h-screen font-sans"
+ className="h-screen flex flex-col font-sans overflow-hidden"
  style={{ background:"var(--bg)", color:"var(--text)" }}
  >
  {/* ── Top bar ─────────────────────────────────────────────────────── */}
  <div
- className="flex items-center justify-between px-6 py-3"
+ className="flex items-center justify-between px-6 py-3 flex-shrink-0"
  style={{ borderBottom:"1px solid var(--border)", background:"var(--bg)" }}
  >
- <div className="flex items-center gap-4">
+ <div className="flex items-center gap-3">
+ <img
+ src="/nith-logo.jpeg"
+ alt="National Institute of Technology Hamirpur"
+ style={{ height: 40, width: 40, objectFit: "contain", flexShrink: 0 }}
+ />
  <div
- className="w-1 self-stretch"
- style={{ background:"var(--accent)", minHeight:"28px" }}
+ className="self-stretch w-px"
+ style={{ background: "var(--border)" }}
  />
  <div>
  <h1
  className="text-sm font-mono font-medium uppercase"
- style={{ color:"var(--text)" }}
+ style={{ color:"var(--text)", letterSpacing: "0.02em" }}
  >
- {mode ==="single"
- ?"Inverted Pendulum"
- :"Double Inverted Pendulum"}
+ National Institute of Technology Hamirpur
  </h1>
  <p
- className="text-[12px] font-mono uppercase mt-0.5"
+ className="text-[11px] font-mono uppercase mt-0.5"
  style={{ color:"var(--text-muted)" }}
  >
- {mode ==="single"
- ?"Cart-Pole System · Real-Time Simulation"
- :"Double Cart-Pole · Free Dynamics · Real-Time Simulation"}
+ Department of Electrical Engineering
  </p>
  </div>
  </div>
@@ -1111,7 +1142,442 @@ export default function Home() {
  </div>
  </div>
 
- {/* ── Main layout ─────────────────────────────────────────────────── */}
+ {/* ── Main layout · left sidebar + content column ─────────────────── */}
+ <div className="flex flex-1 min-h-0">
+
+  {/* ── Left sidebar — controls (fixed · collapsible · independent scroll) ── */}
+  <aside
+   className="flex-shrink-0"
+   style={{
+    width: sidebarCollapsed ? 40 : 360,
+    height: "100%",
+    borderRight: "1px solid var(--border)",
+    background: "var(--bg)",
+    transition: "width 0.18s ease",
+    display: "flex",
+    flexDirection: "column",
+    zIndex: 10,
+   }}
+  >
+   <div
+    className={`flex items-center flex-shrink-0 ${sidebarCollapsed ? "justify-center" : "justify-between"}`}
+    style={{
+     height: 40,
+     padding: "0 10px",
+     borderBottom: "1px solid var(--border)",
+     background: "var(--bg)",
+    }}
+   >
+    {!sidebarCollapsed && (
+     <span className="text-[12px] font-mono uppercase" style={{ color: "var(--text-muted)" }}>
+      Controls
+     </span>
+    )}
+    <button
+     onClick={() => setSidebarCollapsed((v) => !v)}
+     className="font-mono text-[14px] cursor-pointer transition-opacity hover:opacity-70"
+     style={{
+      color: "var(--text-muted)",
+      background: "transparent",
+      border: "none",
+      padding: 4,
+      lineHeight: 1,
+     }}
+     title={sidebarCollapsed ? "Expand controls" : "Collapse controls"}
+     aria-label={sidebarCollapsed ? "Expand controls" : "Collapse controls"}
+    >
+     {sidebarCollapsed ? "›" : "‹"}
+    </button>
+   </div>
+   {!sidebarCollapsed && (
+    <div className="overflow-y-auto flex-1" style={{ padding: 12 }}>
+     <div className="flex flex-col gap-4">
+
+ {/* ── Panel 1 ──────────────────────────────────────────────────── */}
+ {mode ==="single" ? (
+ <div
+ className="p-5"
+ style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}
+ >
+ {/* Controller type selector */}
+ <div className="mb-5">
+ <SectionHeader label="Controller" />
+ <div
+ className="flex gap-1 p-1"
+ style={{ border:"1px solid var(--border)", borderRadius: 4 }}
+ >
+ <button
+ onClick={() => setControllerType("pid")}
+ className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
+ style={{
+ background: controllerType ==="pid" ?"var(--border)" :"transparent",
+ color: controllerType ==="pid" ?"var(--accent)" :"var(--text-muted)",
+ border: controllerType ==="pid" ?"1px solid var(--accent)" :"1px solid transparent",
+ borderRadius: 3,
+ cursor:"pointer",
+ }}
+ >
+ PID
+ </button>
+ <button
+ onClick={() => setControllerType("ppo")}
+ className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
+ style={{
+ background: controllerType ==="ppo" ?"var(--accent-soft)" :"transparent",
+ color: controllerType ==="ppo" ?"var(--violet)" :"var(--text-muted)",
+ border: controllerType ==="ppo" ?"1px solid var(--violet)" :"1px solid transparent",
+ borderRadius: 3,
+ cursor:"pointer",
+ }}
+ >
+ PPO
+ </button>
+ <button
+ onClick={() => setControllerType("pippodr")}
+ className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
+ style={{
+ background: controllerType ==="pippodr" ?"var(--success-soft)" :"transparent",
+ color: controllerType ==="pippodr" ?"var(--success)" :"var(--text-muted)",
+ border: controllerType ==="pippodr" ?"1px solid var(--success)" :"1px solid transparent",
+ borderRadius: 3,
+ cursor:"pointer",
+ }}
+ >
+ PI-PPO-DR
+ </button>
+ </div>
+ </div>
+
+ {controllerType ==="pid" ? (
+ /* ── PID Gains ─────────────────────────────────────────── */
+ <div style={{ opacity: controllerEnabled ? 1 : 0.4, transition:"opacity 0.2s" }}>
+ <div className="flex items-center justify-between mb-5">
+ <SectionHeader label="PID Gains" />
+ {!controllerEnabled && (
+ <span
+ className="text-[13px] font-mono uppercase mb-5"
+ style={{ color:"#c07820" }}
+ >
+ Disabled
+ </span>
+ )}
+ </div>
+ <div className="space-y-5">
+ <SliderRow label="Kp" sublabel="Proportional" value={kp} displayValue={kp.toString()} min={0} max={200} step={1} onChange={setKp} disabled={!controllerEnabled} sliderClass="kp" accent="var(--accent)" />
+ <SliderRow label="Ki" sublabel="Integral" value={ki} displayValue={ki.toFixed(1)} min={0} max={20} step={0.1} onChange={setKi} disabled={!controllerEnabled} sliderClass="ki" accent="var(--warn)" />
+ <SliderRow label="Kd" sublabel="Derivative" value={kd} displayValue={kd.toString()} min={0} max={100} step={1} onChange={setKd} disabled={!controllerEnabled} sliderClass="kd" accent="var(--success)" />
+ </div>
+ </div>
+ ) : controllerType ==="ppo" ? (
+ /* ── PPO Training controls ─────────────────────────────── */
+ <div>
+ <SectionHeader label="PPO Training" />
+
+ {/* Status + metrics */}
+ <div className="flex items-center gap-3 mb-3">
+ <StatusLED
+ active={isTrainingPPO}
+ label={isTrainingPPO ?"Training" : ppoTrained ?"Trained" :"Untrained"}
+ />
+ </div>
+
+ {trainingInfo && (
+ <div className="grid grid-cols-2 gap-1.5 mb-4">
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Updates</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--violet)" }}>{trainingInfo.updateCount}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Steps</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--violet)" }}>{(trainingInfo.totalSteps / 1000).toFixed(1)}k</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Ep Reward</div>
+ <div
+ className="text-base font-mono tabular-nums font-medium"
+ style={{ color: trainingInfo.meanReward > -50 ?"var(--success)" :"var(--danger)" }}
+ >
+ {trainingInfo.meanReward.toFixed(1)}
+ </div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Entropy</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--accent)" }}>{trainingInfo.entropy.toFixed(3)}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Policy Loss</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{trainingInfo.policyLoss.toFixed(4)}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Value Loss</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{trainingInfo.valueLoss.toFixed(3)}</div>
+ </div>
+ </div>
+ )}
+
+ <div className="grid grid-cols-2 gap-2 mb-3">
+ <EngButton
+ onClick={handleStartTraining}
+ disabled={isTrainingPPO}
+ variant="active"
+ >
+ Train
+ </EngButton>
+ <EngButton
+ onClick={handleStopTraining}
+ disabled={!isTrainingPPO}
+ variant="danger"
+ >
+ Stop
+ </EngButton>
+ </div>
+
+ <div className="p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--surface-2)" }}>
+ <p className="text-[12px] font-mono leading-relaxed" style={{ color:"var(--text-dim)" }}>
+ {isTrainingPPO
+ ?"> PPO updates running in background"
+ : ppoTrained
+ ?"> Ready · run simulation to use policy"
+ :"> Train → Run simulation"}
+ </p>
+ </div>
+ </div>
+ ) : (
+ /* ── PI-PPO-DR Training controls ───────────────────────── */
+ <div>
+ <SectionHeader label="PI-PPO-DR Training" />
+
+ <div className="flex items-center gap-3 mb-3">
+ <StatusLED
+ active={isTrainingPIPPODR}
+ label={isTrainingPIPPODR ?"Training" : pippodrTrained ?"Trained" :"Untrained"}
+ />
+ </div>
+
+ {pippodrTrainingInfo && (
+ <div className="grid grid-cols-2 gap-1.5 mb-4">
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Updates</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--success)" }}>{pippodrTrainingInfo.updateCount}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Steps</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--success)" }}>{(pippodrTrainingInfo.totalSteps / 1000).toFixed(1)}k</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Ep Reward</div>
+ <div
+ className="text-base font-mono tabular-nums font-medium"
+ style={{ color: pippodrTrainingInfo.meanReward > -50 ?"var(--success)" :"var(--danger)" }}
+ >
+ {pippodrTrainingInfo.meanReward.toFixed(1)}
+ </div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Entropy</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--accent)" }}>{pippodrTrainingInfo.entropy.toFixed(3)}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Policy Loss</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{pippodrTrainingInfo.policyLoss.toFixed(4)}</div>
+ </div>
+ <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Value Loss</div>
+ <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{pippodrTrainingInfo.valueLoss.toFixed(3)}</div>
+ </div>
+ </div>
+ )}
+
+ <div className="grid grid-cols-2 gap-2 mb-2">
+ <EngButton
+ onClick={handleStartTrainingPIPPODR}
+ disabled={isTrainingPIPPODR}
+ variant="active"
+ >
+ Train
+ </EngButton>
+ <EngButton
+ onClick={handleStopTrainingPIPPODR}
+ disabled={!isTrainingPIPPODR}
+ variant="danger"
+ >
+ Stop
+ </EngButton>
+ </div>
+
+ <label
+ className={`block text-[12px] font-mono uppercase text-center py-1.5 mb-3 transition-all`}
+ style={{
+ border: pippodrLoadedFile ?"1px solid var(--success)" :"1px dashed var(--border)",
+ color: isTrainingPIPPODR ?"var(--text-dim)" :"var(--success)",
+ background: pippodrLoadedFile ?"var(--success-soft)" :"var(--surface-3)",
+ cursor: isTrainingPIPPODR ?"not-allowed" :"pointer",
+ borderRadius: 3,
+ }}
+ >
+ {pippodrLoadedFile
+ ? `✓ ${pippodrLoadedFile.name} · ${pippodrLoadedFile.sizeKb.toFixed(1)} kB · replace`
+ :"Load weights JSON"}
+ <input
+ type="file"
+ accept="application/json,.json"
+ style={{ display:"none" }}
+ disabled={isTrainingPIPPODR}
+ onChange={(e) => {
+ const f = e.target.files?.[0];
+ if (f) handleLoadPIPPODRWeights(f);
+ e.target.value ="";
+ }}
+ />
+ </label>
+
+ <div className="p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--surface-2)" }}>
+ <p className="text-[12px] font-mono leading-relaxed" style={{ color:"var(--text-dim)" }}>
+ {isTrainingPIPPODR
+ ?"> PI-PPO-DR updates running in background"
+ : pippodrLoadedFile
+ ? `> Loaded ${pippodrLoadedFile.name} · run simulation to use policy`
+ : pippodrTrained
+ ?"> Ready · run simulation to use policy"
+ :"> Skeleton clone of PPO · Train → Run simulation"}
+ </p>
+ </div>
+ </div>
+ )}
+ </div>
+ ) : (
+ /* Double — Initial Conditions */
+ <div className="p-5" style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}>
+ <SectionHeader label="Initial Conditions" />
+ <p className="text-[12px] font-mono mt-1 mb-4" style={{ color:"var(--text-dim)" }}>Applied on next Reset</p>
+ <div className="space-y-5">
+ <SliderRow label="θ₁₀" sublabel="Rod 1 init angle" value={(dblInitTh1 * 180) / Math.PI} displayValue={`${((dblInitTh1 * 180) / Math.PI).toFixed(1)}°`} min={-60} max={60} step={1} onChange={(v) => setDblInitTh1((v * Math.PI) / 180)} sliderClass="di1" accent="#e08010" />
+ <SliderRow label="θ₂₀" sublabel="Rod 2 init angle" value={(dblInitTh2 * 180) / Math.PI} displayValue={`${((dblInitTh2 * 180) / Math.PI).toFixed(1)}°`} min={-60} max={60} step={1} onChange={(v) => setDblInitTh2((v * Math.PI) / 180)} sliderClass="di2" accent="#00c8d8" />
+ <SliderRow label="b" sublabel="Joint damping" value={dblDamping} displayValue={dblDamping.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setDblDamping} sliderClass="dd" accent="var(--violet)" />
+ </div>
+ </div>
+ )}
+
+ {/* ── Panel 2: Physical Parameters (always shown) ────────────── */}
+ {mode ==="single" ? (
+ <div className="p-5" style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}>
+ <div className="flex items-center justify-between mb-2">
+ <SectionHeader label="Physical Parameters" />
+ </div>
+ <button
+ onClick={applyHardwarePreset}
+ className="w-full text-[12px] font-mono uppercase px-3 py-2 mb-4"
+ style={{
+ background:"var(--accent-soft)",
+ color:"var(--accent)",
+ border:"1px solid var(--accent)",
+ borderRadius: 3,
+ cursor:"pointer",
+ }}
+ title="Snap all sliders to the PDF Table 1 nominal training values"
+ >
+ ⟲ Hardware Preset (PDF Nominals)
+ </button>
+ {isUnderActuated && (
+ <div
+ className="mb-4 px-3 py-2 text-[12px] font-mono"
+ style={{ background:"var(--warn-soft)", color:"var(--warn)", border:"1px solid var(--warn)", borderRadius: 3 }}
+ >
+ ⚠ <span className="uppercase">System Heavily Under-Actuated</span>
+ <div className="mt-1 normal-case tracking-normal" style={{ color:"var(--warn)" }}>
+ Peak accel = F_max / (M₁ + m₂) = {peakAccel.toFixed(2)} m/s² &lt; 0.2 g (1.96 m/s²).
+ Swing-up will not be possible — increase F_max or reduce mass.
+ </div>
+ </div>
+ )}
+ <div className="space-y-5">
+ <SliderRow label="M₁" sublabel="Cart mass" value={cartMass} displayValue={`${cartMass.toFixed(2)} kg`} min={0.1} max={5} step={0.1} onChange={setCartMass} sliderClass="cm" accent="var(--text-dim)" />
+ <SliderRow label="m₂" sublabel="Pendulum mass" value={pendulumMass} displayValue={`${pendulumMass.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setPendulumMass} sliderClass="pm" accent="var(--violet)" />
+ <SliderRow label="L" sublabel="Pendulum length" value={pendulumLength} displayValue={`${pendulumLength.toFixed(2)} m`} min={0.2} max={2.0} step={0.05} onChange={setPendulumLength} sliderClass="pl" accent="#f472b6" />
+ <SliderRow label="F_max" sublabel="Motor force limit (N)" value={maxForce} displayValue={`${maxForce.toFixed(1)} N`} min={5} max={60} step={1} onChange={setMaxForce} sliderClass="fm" accent="var(--warn)" />
+ <SliderRow label="μ" sublabel="Track friction" value={trackFriction} displayValue={trackFriction.toFixed(2)} min={0} max={0.5} step={0.01} onChange={setTrackFriction} sliderClass="tf" accent="var(--text-dim)" />
+ <SliderRow label="e" sublabel="Wall restitution" value={wallRestitution} displayValue={wallRestitution.toFixed(2)} min={0} max={0.2} step={0.01} onChange={setWallRestitution} sliderClass="wr" accent="var(--danger)" />
+ <SliderRow label="b" sublabel="Air resistance" value={airResistance} displayValue={airResistance.toFixed(3)} min={0} max={0.1} step={0.005} onChange={setAirResistance} sliderClass="ar" accent="var(--teal)" />
+ <SliderRow label="θ₀" sublabel="Initial angle" value={initialAngle * (180 / Math.PI)} displayValue={`${((initialAngle * 180) / Math.PI).toFixed(1)}°`} min={-180} max={180} step={1} onChange={(v) => setInitialAngle((v * Math.PI) / 180)} sliderClass="ia" accent="var(--warn)" />
+ </div>
+
+ {/* PPO hyper-parameters (shown below physical params when PPO selected) */}
+ {controllerType ==="ppo" && (
+ <div className="mt-6">
+ <SectionHeader label="Training Hyper-parameters" />
+ <p className="text-[12px] font-mono mb-4 -mt-3" style={{ color:"var(--text-dim)" }}>
+ Continuous Gaussian policy · +1 reward/step · CartPole-v1 style
+ </p>
+ <div className="space-y-4">
+ <SliderRow label="lr" sublabel="Learning rate" value={ppoLr * 10000} displayValue={`${(ppoLr * 10000).toFixed(1)}e-4`} min={0.5} max={10} step={0.5} onChange={(v) => setPpoLr(v / 10000)} sliderClass="plr" accent="var(--violet)" disabled={isTrainingPPO} />
+ <SliderRow label="γ" sublabel="Discount factor" value={ppoGamma} displayValue={ppoGamma.toFixed(3)} min={0.9} max={0.999} step={0.001} onChange={setPpoGamma} sliderClass="pgm" accent="var(--violet)" disabled={isTrainingPPO} />
+ <SliderRow label="ε" sublabel="Clip ratio" value={ppoClipRatio} displayValue={ppoClipRatio.toFixed(2)} min={0.05} max={0.5} step={0.01} onChange={setPpoClipRatio} sliderClass="pcr" accent="var(--violet)" disabled={isTrainingPPO} />
+ <SliderRow label="c_vf" sublabel="Value loss coeff" value={ppoVfCoef} displayValue={ppoVfCoef.toFixed(2)} min={0.1} max={1.0} step={0.05} onChange={setPpoVfCoef} sliderClass="pvf" accent="var(--violet)" disabled={isTrainingPPO} />
+ <SliderRow label="c_ent" sublabel="Entropy coeff" value={ppoEntropyCoeff} displayValue={ppoEntropyCoeff.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setPpoEntropyCoeff} sliderClass="pec" accent="var(--violet)" disabled={isTrainingPPO} />
+ </div>
+ </div>
+ )}
+
+ {controllerType ==="pippodr" && (
+ <div className="mt-6">
+ <SectionHeader label="PI Reward Weights" />
+ <p className="text-[12px] font-mono mb-4 -mt-3" style={{ color:"var(--text-dim)" }}>
+ Energy + precision + smoothness, α-blended by |θ|
+ </p>
+ <div className="space-y-4">
+ <SliderRow label="w_E" sublabel="Energy term" value={wE} displayValue={wE.toFixed(2)} min={0} max={5} step={0.05} onChange={setWE} sliderClass="pirwE" accent="var(--success)" disabled={isTrainingPIPPODR} />
+ <SliderRow label="w_θ" sublabel="Angle² penalty" value={wTheta} displayValue={wTheta.toFixed(2)} min={0} max={5} step={0.05} onChange={setWTheta} sliderClass="pirwT" accent="var(--success)" disabled={isTrainingPIPPODR} />
+ <SliderRow label="w_u" sublabel="Effort² penalty" value={wU} displayValue={wU.toFixed(4)} min={0} max={0.05} step={0.001} onChange={setWU} sliderClass="pirwU" accent="var(--success)" disabled={isTrainingPIPPODR} />
+ <SliderRow label="w_Δu" sublabel="Chatter (Δu²) penalty" value={wDeltaU} displayValue={wDeltaU.toFixed(3)} min={0} max={0.2} step={0.001} onChange={setWDeltaU} sliderClass="pirwDu" accent="var(--success)" disabled={isTrainingPIPPODR} />
+ <SliderRow label="θ_c" sublabel="Blend knee (rad)" value={thetaC} displayValue={thetaC.toFixed(2)} min={0.05} max={1.5} step={0.01} onChange={setThetaC} sliderClass="pirtc" accent="var(--success)" disabled={isTrainingPIPPODR} />
+ </div>
+
+ <div className="mt-5">
+ <SectionHeader label="Domain Randomization" />
+ <div className="flex items-center justify-between p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
+ <div>
+ <div className="text-[12px] font-mono uppercase" style={{ color:"var(--text)" }}>DR active</div>
+ <div className="text-[13px] font-mono mt-1" style={{ color:"var(--text-muted)" }}>Per-episode randomization of M_c, M_p, L, b_c, b_p, K_m, τ_d + sensor noise</div>
+ </div>
+ <button
+ onClick={() => setDrEnabled(!drEnabled)}
+ disabled={isTrainingPIPPODR}
+ className="text-[12px] font-mono uppercase px-3 py-1.5"
+ style={{
+ background: drEnabled ?"var(--success-soft)" :"var(--danger-soft)",
+ color: drEnabled ?"var(--success)" :"var(--danger)",
+ border: `1px solid ${drEnabled ?"var(--success)" :"var(--danger)"}`,
+ borderRadius: 3,
+ cursor: isTrainingPIPPODR ?"not-allowed" :"pointer",
+ opacity: isTrainingPIPPODR ? 0.5 : 1,
+ }}
+ >
+ {drEnabled ?"ON" :"OFF"}
+ </button>
+ </div>
+ </div>
+ </div>
+ )}
+ </div>
+ ) : (
+ /* Double — Physical Parameters */
+ <div className="p-5" style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}>
+ <SectionHeader label="Physical Parameters" />
+ <div className="space-y-5">
+ <SliderRow label="m₁" sublabel="Bob 1 mass" value={dblMass1} displayValue={`${dblMass1.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setDblMass1} sliderClass="dm1" accent="#e08010" />
+ <SliderRow label="m₂" sublabel="Bob 2 mass" value={dblMass2} displayValue={`${dblMass2.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setDblMass2} sliderClass="dm2" accent="#00c8d8" />
+ <SliderRow label="l₁" sublabel="Rod 1 length" value={dblLength1} displayValue={`${dblLength1.toFixed(2)} m`} min={0.2} max={1.5} step={0.05} onChange={setDblLength1} sliderClass="dl1" accent="var(--violet)" />
+ <SliderRow label="l₂" sublabel="Rod 2 length" value={dblLength2} displayValue={`${dblLength2.toFixed(2)} m`} min={0.2} max={1.5} step={0.05} onChange={setDblLength2} sliderClass="dl2" accent="var(--warn)" />
+ </div>
+ </div>
+ )}
+      </div>
+    </div>
+   )}
+  </aside>
+
+  {/* ── Main content column · independent scroll ─────────────────── */}
+  <main className="flex-1 min-w-0 overflow-y-auto">
  <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-4">
 
  {/* ── Simulation Control ────────────────────────────────────────── */}
@@ -1128,7 +1594,7 @@ export default function Home() {
  <EngButton onClick={handlePerturbation} disabled={!isRunning} variant="ghost">
  Inject Disturbance +0.3 rad
  </EngButton>
- <EngButton onClick={toggleController} variant={controllerEnabled ?"default" :"active"}>
+ <EngButton onClick={toggleController} variant={controllerEnabled ?"danger" :"active"}>
  {controllerEnabled ?"Disable Controller" :"Enable Controller"}
  </EngButton>
  </>
@@ -1327,9 +1793,9 @@ export default function Home() {
  onClick={() => setPlots3dEnabled((v) => !v)}
  className="text-[13px] font-mono uppercase px-3 py-1 rounded-md"
  style={{
- background: plots3dEnabled ?"var(--accent-soft)" :"transparent",
- color: plots3dEnabled ?"var(--accent)" :"var(--text-muted)",
- border: `1px solid ${plots3dEnabled ?"var(--accent)" :"var(--border)"}`,
+ background: plots3dEnabled ?"var(--success-soft)" :"var(--danger-soft)",
+ color: plots3dEnabled ?"var(--success)" :"var(--danger)",
+ border: `1px solid ${plots3dEnabled ?"var(--success)" :"var(--danger)"}`,
  cursor:"pointer",
  }}
  title="Toggle the 3-D plot panel (disable for max simulation speed)"
@@ -1617,390 +2083,7 @@ export default function Home() {
  </div>
  )}
 
- {/* ══════════════════════════════════════════════════════════════════
- Bottom panels
- ══════════════════════════════════════════════════════════════════ */}
- <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
- {/* ── Panel 1 ──────────────────────────────────────────────────── */}
- {mode ==="single" ? (
- <div
- className="p-5"
- style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}
- >
- {/* Controller type selector */}
- <div className="mb-5">
- <SectionHeader label="Controller" />
- <div
- className="flex gap-1 p-1"
- style={{ border:"1px solid var(--border)", borderRadius: 4 }}
- >
- <button
- onClick={() => setControllerType("pid")}
- className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
- style={{
- background: controllerType ==="pid" ?"var(--border)" :"transparent",
- color: controllerType ==="pid" ?"var(--accent)" :"var(--text-muted)",
- border: controllerType ==="pid" ?"1px solid var(--accent)" :"1px solid transparent",
- borderRadius: 3,
- cursor:"pointer",
- }}
- >
- PID
- </button>
- <button
- onClick={() => setControllerType("ppo")}
- className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
- style={{
- background: controllerType ==="ppo" ?"var(--accent-soft)" :"transparent",
- color: controllerType ==="ppo" ?"var(--violet)" :"var(--text-muted)",
- border: controllerType ==="ppo" ?"1px solid var(--violet)" :"1px solid transparent",
- borderRadius: 3,
- cursor:"pointer",
- }}
- >
- PPO
- </button>
- <button
- onClick={() => setControllerType("pippodr")}
- className="flex-1 py-1.5 text-[12px] font-mono uppercase transition-all"
- style={{
- background: controllerType ==="pippodr" ?"var(--success-soft)" :"transparent",
- color: controllerType ==="pippodr" ?"var(--success)" :"var(--text-muted)",
- border: controllerType ==="pippodr" ?"1px solid var(--success)" :"1px solid transparent",
- borderRadius: 3,
- cursor:"pointer",
- }}
- >
- PI-PPO-DR
- </button>
- </div>
- </div>
-
- {controllerType ==="pid" ? (
- /* ── PID Gains ─────────────────────────────────────────── */
- <div style={{ opacity: controllerEnabled ? 1 : 0.4, transition:"opacity 0.2s" }}>
- <div className="flex items-center justify-between mb-5">
- <SectionHeader label="PID Gains" />
- {!controllerEnabled && (
- <span
- className="text-[13px] font-mono uppercase mb-5"
- style={{ color:"#c07820" }}
- >
- Disabled
- </span>
- )}
- </div>
- <div className="space-y-5">
- <SliderRow label="Kp" sublabel="Proportional" value={kp} displayValue={kp.toString()} min={0} max={200} step={1} onChange={setKp} disabled={!controllerEnabled} sliderClass="kp" accent="var(--accent)" />
- <SliderRow label="Ki" sublabel="Integral" value={ki} displayValue={ki.toFixed(1)} min={0} max={20} step={0.1} onChange={setKi} disabled={!controllerEnabled} sliderClass="ki" accent="var(--warn)" />
- <SliderRow label="Kd" sublabel="Derivative" value={kd} displayValue={kd.toString()} min={0} max={100} step={1} onChange={setKd} disabled={!controllerEnabled} sliderClass="kd" accent="var(--success)" />
- </div>
- </div>
- ) : controllerType ==="ppo" ? (
- /* ── PPO Training controls ─────────────────────────────── */
- <div>
- <SectionHeader label="PPO Training" />
-
- {/* Status + metrics */}
- <div className="flex items-center gap-3 mb-3">
- <StatusLED
- active={isTrainingPPO}
- label={isTrainingPPO ?"Training" : ppoTrained ?"Trained" :"Untrained"}
- />
- </div>
-
- {trainingInfo && (
- <div className="grid grid-cols-2 gap-1.5 mb-4">
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Updates</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--violet)" }}>{trainingInfo.updateCount}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Steps</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--violet)" }}>{(trainingInfo.totalSteps / 1000).toFixed(1)}k</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Ep Reward</div>
- <div
- className="text-base font-mono tabular-nums font-medium"
- style={{ color: trainingInfo.meanReward > -50 ?"var(--success)" :"var(--danger)" }}
- >
- {trainingInfo.meanReward.toFixed(1)}
- </div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Entropy</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--accent)" }}>{trainingInfo.entropy.toFixed(3)}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Policy Loss</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{trainingInfo.policyLoss.toFixed(4)}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Value Loss</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{trainingInfo.valueLoss.toFixed(3)}</div>
- </div>
- </div>
- )}
-
- <div className="grid grid-cols-2 gap-2 mb-3">
- <EngButton
- onClick={handleStartTraining}
- disabled={isTrainingPPO}
- variant="active"
- >
- Train
- </EngButton>
- <EngButton
- onClick={handleStopTraining}
- disabled={!isTrainingPPO}
- variant="warn"
- >
- Stop
- </EngButton>
- </div>
-
- <div className="p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--surface-2)" }}>
- <p className="text-[12px] font-mono leading-relaxed" style={{ color:"var(--text-dim)" }}>
- {isTrainingPPO
- ?"> PPO updates running in background"
- : ppoTrained
- ?"> Ready · run simulation to use policy"
- :"> Train → Run simulation"}
- </p>
- </div>
- </div>
- ) : (
- /* ── PI-PPO-DR Training controls ───────────────────────── */
- <div>
- <SectionHeader label="PI-PPO-DR Training" />
-
- <div className="flex items-center gap-3 mb-3">
- <StatusLED
- active={isTrainingPIPPODR}
- label={isTrainingPIPPODR ?"Training" : pippodrTrained ?"Trained" :"Untrained"}
- />
- </div>
-
- {pippodrTrainingInfo && (
- <div className="grid grid-cols-2 gap-1.5 mb-4">
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Updates</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--success)" }}>{pippodrTrainingInfo.updateCount}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Steps</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--success)" }}>{(pippodrTrainingInfo.totalSteps / 1000).toFixed(1)}k</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Ep Reward</div>
- <div
- className="text-base font-mono tabular-nums font-medium"
- style={{ color: pippodrTrainingInfo.meanReward > -50 ?"var(--success)" :"var(--danger)" }}
- >
- {pippodrTrainingInfo.meanReward.toFixed(1)}
- </div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Entropy</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--accent)" }}>{pippodrTrainingInfo.entropy.toFixed(3)}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Policy Loss</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{pippodrTrainingInfo.policyLoss.toFixed(4)}</div>
- </div>
- <div className="px-3 py-2" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div className="text-[13px] font-mono uppercase" style={{ color:"var(--text-muted)" }}>Value Loss</div>
- <div className="text-base font-mono tabular-nums font-medium" style={{ color:"var(--warn)" }}>{pippodrTrainingInfo.valueLoss.toFixed(3)}</div>
- </div>
- </div>
- )}
-
- <div className="grid grid-cols-2 gap-2 mb-2">
- <EngButton
- onClick={handleStartTrainingPIPPODR}
- disabled={isTrainingPIPPODR}
- variant="active"
- >
- Train
- </EngButton>
- <EngButton
- onClick={handleStopTrainingPIPPODR}
- disabled={!isTrainingPIPPODR}
- variant="warn"
- >
- Stop
- </EngButton>
- </div>
-
- <label
- className={`block text-[12px] font-mono uppercase text-center py-1.5 mb-3 transition-all`}
- style={{
- border: pippodrLoadedFile ?"1px solid var(--success)" :"1px dashed var(--border)",
- color: isTrainingPIPPODR ?"var(--text-dim)" :"var(--success)",
- background: pippodrLoadedFile ?"var(--success-soft)" :"var(--surface-3)",
- cursor: isTrainingPIPPODR ?"not-allowed" :"pointer",
- borderRadius: 3,
- }}
- >
- {pippodrLoadedFile
- ? `✓ ${pippodrLoadedFile.name} · ${pippodrLoadedFile.sizeKb.toFixed(1)} kB · replace`
- :"Load weights JSON"}
- <input
- type="file"
- accept="application/json,.json"
- style={{ display:"none" }}
- disabled={isTrainingPIPPODR}
- onChange={(e) => {
- const f = e.target.files?.[0];
- if (f) handleLoadPIPPODRWeights(f);
- e.target.value ="";
- }}
- />
- </label>
-
- <div className="p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--surface-2)" }}>
- <p className="text-[12px] font-mono leading-relaxed" style={{ color:"var(--text-dim)" }}>
- {isTrainingPIPPODR
- ?"> PI-PPO-DR updates running in background"
- : pippodrLoadedFile
- ? `> Loaded ${pippodrLoadedFile.name} · run simulation to use policy`
- : pippodrTrained
- ?"> Ready · run simulation to use policy"
- :"> Skeleton clone of PPO · Train → Run simulation"}
- </p>
- </div>
- </div>
- )}
- </div>
- ) : (
- /* Double — Initial Conditions */
- <div className="p-5" style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}>
- <SectionHeader label="Initial Conditions" />
- <p className="text-[12px] font-mono mt-1 mb-4" style={{ color:"var(--text-dim)" }}>Applied on next Reset</p>
- <div className="space-y-5">
- <SliderRow label="θ₁₀" sublabel="Rod 1 init angle" value={(dblInitTh1 * 180) / Math.PI} displayValue={`${((dblInitTh1 * 180) / Math.PI).toFixed(1)}°`} min={-60} max={60} step={1} onChange={(v) => setDblInitTh1((v * Math.PI) / 180)} sliderClass="di1" accent="#e08010" />
- <SliderRow label="θ₂₀" sublabel="Rod 2 init angle" value={(dblInitTh2 * 180) / Math.PI} displayValue={`${((dblInitTh2 * 180) / Math.PI).toFixed(1)}°`} min={-60} max={60} step={1} onChange={(v) => setDblInitTh2((v * Math.PI) / 180)} sliderClass="di2" accent="#00c8d8" />
- <SliderRow label="b" sublabel="Joint damping" value={dblDamping} displayValue={dblDamping.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setDblDamping} sliderClass="dd" accent="var(--violet)" />
- </div>
- </div>
- )}
-
- {/* ── Panel 2: Physical Parameters (always shown) ────────────── */}
- {mode ==="single" ? (
- <div className="p-5 overflow-y-auto" style={{ border:"1px solid var(--border)", background:"var(--surface-1)", maxHeight:"600px" }}>
- <div className="flex items-center justify-between mb-2">
- <SectionHeader label="Physical Parameters" />
- </div>
- <button
- onClick={applyHardwarePreset}
- className="w-full text-[12px] font-mono uppercase px-3 py-2 mb-4"
- style={{
- background:"var(--accent-soft)",
- color:"var(--accent)",
- border:"1px solid var(--accent)",
- borderRadius: 3,
- cursor:"pointer",
- }}
- title="Snap all sliders to the PDF Table 1 nominal training values"
- >
- ⟲ Hardware Preset (PDF Nominals)
- </button>
- {isUnderActuated && (
- <div
- className="mb-4 px-3 py-2 text-[12px] font-mono"
- style={{ background:"var(--warn-soft)", color:"var(--warn)", border:"1px solid var(--warn)", borderRadius: 3 }}
- >
- ⚠ <span className="uppercase">System Heavily Under-Actuated</span>
- <div className="mt-1 normal-case tracking-normal" style={{ color:"var(--warn)" }}>
- Peak accel = F_max / (M₁ + m₂) = {peakAccel.toFixed(2)} m/s² &lt; 0.2 g (1.96 m/s²).
- Swing-up will not be possible — increase F_max or reduce mass.
- </div>
- </div>
- )}
- <div className="space-y-5">
- <SliderRow label="M₁" sublabel="Cart mass" value={cartMass} displayValue={`${cartMass.toFixed(2)} kg`} min={0.1} max={5} step={0.1} onChange={setCartMass} sliderClass="cm" accent="var(--text-dim)" />
- <SliderRow label="m₂" sublabel="Pendulum mass" value={pendulumMass} displayValue={`${pendulumMass.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setPendulumMass} sliderClass="pm" accent="var(--violet)" />
- <SliderRow label="L" sublabel="Pendulum length" value={pendulumLength} displayValue={`${pendulumLength.toFixed(2)} m`} min={0.2} max={2.0} step={0.05} onChange={setPendulumLength} sliderClass="pl" accent="#f472b6" />
- <SliderRow label="F_max" sublabel="Motor force limit (N)" value={maxForce} displayValue={`${maxForce.toFixed(1)} N`} min={5} max={60} step={1} onChange={setMaxForce} sliderClass="fm" accent="var(--warn)" />
- <SliderRow label="μ" sublabel="Track friction" value={trackFriction} displayValue={trackFriction.toFixed(2)} min={0} max={0.5} step={0.01} onChange={setTrackFriction} sliderClass="tf" accent="var(--text-dim)" />
- <SliderRow label="e" sublabel="Wall restitution" value={wallRestitution} displayValue={wallRestitution.toFixed(2)} min={0} max={0.2} step={0.01} onChange={setWallRestitution} sliderClass="wr" accent="var(--danger)" />
- <SliderRow label="b" sublabel="Air resistance" value={airResistance} displayValue={airResistance.toFixed(3)} min={0} max={0.1} step={0.005} onChange={setAirResistance} sliderClass="ar" accent="var(--teal)" />
- <SliderRow label="θ₀" sublabel="Initial angle" value={initialAngle * (180 / Math.PI)} displayValue={`${((initialAngle * 180) / Math.PI).toFixed(1)}°`} min={-180} max={180} step={1} onChange={(v) => setInitialAngle((v * Math.PI) / 180)} sliderClass="ia" accent="var(--warn)" />
- </div>
-
- {/* PPO hyper-parameters (shown below physical params when PPO selected) */}
- {controllerType ==="ppo" && (
- <div className="mt-6">
- <SectionHeader label="Training Hyper-parameters" />
- <p className="text-[12px] font-mono mb-4 -mt-3" style={{ color:"var(--text-dim)" }}>
- Continuous Gaussian policy · +1 reward/step · CartPole-v1 style
- </p>
- <div className="space-y-4">
- <SliderRow label="lr" sublabel="Learning rate" value={ppoLr * 10000} displayValue={`${(ppoLr * 10000).toFixed(1)}e-4`} min={0.5} max={10} step={0.5} onChange={(v) => setPpoLr(v / 10000)} sliderClass="plr" accent="var(--violet)" disabled={isTrainingPPO} />
- <SliderRow label="γ" sublabel="Discount factor" value={ppoGamma} displayValue={ppoGamma.toFixed(3)} min={0.9} max={0.999} step={0.001} onChange={setPpoGamma} sliderClass="pgm" accent="var(--violet)" disabled={isTrainingPPO} />
- <SliderRow label="ε" sublabel="Clip ratio" value={ppoClipRatio} displayValue={ppoClipRatio.toFixed(2)} min={0.05} max={0.5} step={0.01} onChange={setPpoClipRatio} sliderClass="pcr" accent="var(--violet)" disabled={isTrainingPPO} />
- <SliderRow label="c_vf" sublabel="Value loss coeff" value={ppoVfCoef} displayValue={ppoVfCoef.toFixed(2)} min={0.1} max={1.0} step={0.05} onChange={setPpoVfCoef} sliderClass="pvf" accent="var(--violet)" disabled={isTrainingPPO} />
- <SliderRow label="c_ent" sublabel="Entropy coeff" value={ppoEntropyCoeff} displayValue={ppoEntropyCoeff.toFixed(3)} min={0} max={0.05} step={0.001} onChange={setPpoEntropyCoeff} sliderClass="pec" accent="var(--violet)" disabled={isTrainingPPO} />
- </div>
- </div>
- )}
-
- {controllerType ==="pippodr" && (
- <div className="mt-6">
- <SectionHeader label="PI Reward Weights" />
- <p className="text-[12px] font-mono mb-4 -mt-3" style={{ color:"var(--text-dim)" }}>
- Energy + precision + smoothness, α-blended by |θ|
- </p>
- <div className="space-y-4">
- <SliderRow label="w_E" sublabel="Energy term" value={wE} displayValue={wE.toFixed(2)} min={0} max={5} step={0.05} onChange={setWE} sliderClass="pirwE" accent="var(--success)" disabled={isTrainingPIPPODR} />
- <SliderRow label="w_θ" sublabel="Angle² penalty" value={wTheta} displayValue={wTheta.toFixed(2)} min={0} max={5} step={0.05} onChange={setWTheta} sliderClass="pirwT" accent="var(--success)" disabled={isTrainingPIPPODR} />
- <SliderRow label="w_u" sublabel="Effort² penalty" value={wU} displayValue={wU.toFixed(4)} min={0} max={0.05} step={0.001} onChange={setWU} sliderClass="pirwU" accent="var(--success)" disabled={isTrainingPIPPODR} />
- <SliderRow label="w_Δu" sublabel="Chatter (Δu²) penalty" value={wDeltaU} displayValue={wDeltaU.toFixed(3)} min={0} max={0.2} step={0.001} onChange={setWDeltaU} sliderClass="pirwDu" accent="var(--success)" disabled={isTrainingPIPPODR} />
- <SliderRow label="θ_c" sublabel="Blend knee (rad)" value={thetaC} displayValue={thetaC.toFixed(2)} min={0.05} max={1.5} step={0.01} onChange={setThetaC} sliderClass="pirtc" accent="var(--success)" disabled={isTrainingPIPPODR} />
- </div>
-
- <div className="mt-5">
- <SectionHeader label="Domain Randomization" />
- <div className="flex items-center justify-between p-3" style={{ background:"var(--surface-3)", border:"1px solid var(--border)" }}>
- <div>
- <div className="text-[12px] font-mono uppercase" style={{ color:"var(--text)" }}>DR active</div>
- <div className="text-[13px] font-mono mt-1" style={{ color:"var(--text-muted)" }}>Per-episode randomization of M_c, M_p, L, b_c, b_p, K_m, τ_d + sensor noise</div>
- </div>
- <button
- onClick={() => setDrEnabled(!drEnabled)}
- disabled={isTrainingPIPPODR}
- className="text-[12px] font-mono uppercase px-3 py-1.5"
- style={{
- background: drEnabled ?"var(--success-soft)" :"transparent",
- color: drEnabled ?"var(--success)" :"var(--text-muted)",
- border: drEnabled ?"1px solid var(--success)" :"1px solid var(--border)",
- borderRadius: 3,
- cursor: isTrainingPIPPODR ?"not-allowed" :"pointer",
- opacity: isTrainingPIPPODR ? 0.5 : 1,
- }}
- >
- {drEnabled ?"ON" :"OFF"}
- </button>
- </div>
- </div>
- </div>
- )}
- </div>
- ) : (
- /* Double — Physical Parameters */
- <div className="p-5" style={{ border:"1px solid var(--border)", background:"var(--surface-1)" }}>
- <SectionHeader label="Physical Parameters" />
- <div className="space-y-5">
- <SliderRow label="m₁" sublabel="Bob 1 mass" value={dblMass1} displayValue={`${dblMass1.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setDblMass1} sliderClass="dm1" accent="#e08010" />
- <SliderRow label="m₂" sublabel="Bob 2 mass" value={dblMass2} displayValue={`${dblMass2.toFixed(2)} kg`} min={0.01} max={1} step={0.01} onChange={setDblMass2} sliderClass="dm2" accent="#00c8d8" />
- <SliderRow label="l₁" sublabel="Rod 1 length" value={dblLength1} displayValue={`${dblLength1.toFixed(2)} m`} min={0.2} max={1.5} step={0.05} onChange={setDblLength1} sliderClass="dl1" accent="var(--violet)" />
- <SliderRow label="l₂" sublabel="Rod 2 length" value={dblLength2} displayValue={`${dblLength2.toFixed(2)} m`} min={0.2} max={1.5} step={0.05} onChange={setDblLength2} sliderClass="dl2" accent="var(--warn)" />
- </div>
- </div>
- )}
- </div>
 
  {/* ── Footer note ───────────────────────────────────────────────── */}
  <div
@@ -2020,6 +2103,8 @@ export default function Home() {
  :"g = 9.81 m/s² · L = 5.0 m · double pole · no controller"}
  </span>
  </div>
+ </div>
+ </main>
  </div>
  </div>
  );

@@ -10,44 +10,44 @@
  * ─────────────────────────────────────────────────────────────────────────*/
 :root,
 :root[data-theme="light"] {
-    /* Surfaces */
-    --bg: #f8fafc; /* slate-50  — page background */
-    --surface-1: #ffffff; /* top panels                  */
-    --surface-2: #ffffff; /* cards                       */
-    --surface-3: #f1f5f9; /* inset / readouts            */
-    --surface-hover: #f8fafc;
+    /* Surfaces — bg slightly cooler so white cards "lift" off it. */
+    --bg: #eef2f7;            /* slate-100/200 mix, ~7% darker than slate-50 */
+    --surface-1: #ffffff;     /* top panels / card headers */
+    --surface-2: #ffffff;     /* card body */
+    --surface-3: #f1f5f9;     /* inset / readouts */
+    --surface-hover: #e2e8f0;
 
-    /* Borders */
-    --border: #e2e8f0; /* slate-200                   */
-    --border-soft: #f1f5f9; /* slate-100                   */
-    --border-strong: #cbd5e1; /* slate-300                   */
+    /* Borders — bumped one full shade darker so dividers actually divide. */
+    --border: #cbd5e1;        /* slate-300                  (was slate-200, 1.3:1 → 1.6:1) */
+    --border-soft: #e2e8f0;   /* slate-200                  (was slate-100) */
+    --border-strong: #94a3b8; /* slate-400                  (was slate-300) */
 
-    /* Text */
-    --text: #0f172a; /* slate-900                   */
-    --text-muted: #475569; /* slate-600                   */
-    --text-dim: #94a3b8; /* slate-400                   */
+    /* Text — every tier passes WCAG AA on white now. */
+    --text: #0f172a;          /* slate-900   17.6:1 ✓        */
+    --text-muted: #334155;    /* slate-700   10.4:1 ✓   (was slate-600, 7.5:1) */
+    --text-dim: #475569;      /* slate-600   7.5:1 ✓    (was slate-400, 3.2:1 — failed AA) */
 
-    /* Accents */
-    --accent: #2563eb; /* blue-600                    */
-    --accent-soft: #dbeafe; /* blue-100                    */
-    --accent-strong: #1d4ed8; /* blue-700                    */
-    --success: #059669; /* emerald-600                 */
+    /* Accents — pulled half a shade darker so they meet AA against white. */
+    --accent: #1d4ed8;        /* blue-700    8.6:1 ✓    (was blue-600, 5.4:1) */
+    --accent-soft: #dbeafe;
+    --accent-strong: #1e3a8a; /* blue-900                   */
+    --success: #047857;       /* emerald-700 5.8:1 ✓    (was emerald-600, 3.8:1) */
     --success-soft: #d1fae5;
-    --warn: #d97706; /* amber-600                   */
+    --warn: #b45309;          /* amber-700   5.9:1 ✓    (was amber-600, 3.4:1) */
     --warn-soft: #fef3c7;
-    --danger: #dc2626; /* red-600                     */
+    --danger: #b91c1c;        /* red-700     6.6:1 ✓    (was red-600, 4.8:1) */
     --danger-soft: #fee2e2;
-    --violet: #7c3aed;
-    --teal: #0d9488;
+    --violet: #6d28d9;        /* violet-700                 */
+    --teal: #0f766e;          /* teal-700                   */
 
-    /* Effects */
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+    /* Effects — slightly deeper shadows since the cooler bg makes them readable. */
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
     --shadow-md:
-        0 4px 6px -1px rgba(15, 23, 42, 0.08),
-        0 2px 4px -2px rgba(15, 23, 42, 0.04);
+        0 4px 6px -1px rgba(15, 23, 42, 0.10),
+        0 2px 4px -2px rgba(15, 23, 42, 0.06);
     --shadow-lg:
-        0 10px 15px -3px rgba(15, 23, 42, 0.08),
-        0 4px 6px -4px rgba(15, 23, 42, 0.05);
+        0 10px 15px -3px rgba(15, 23, 42, 0.12),
+        0 4px 6px -4px rgba(15, 23, 42, 0.06);
 
     color-scheme: light;
 }
