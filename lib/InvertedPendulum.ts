@@ -20,6 +20,7 @@ export class InvertedPendulum {
   private friction: number = 0.1; // Cart viscous friction coefficient
   private airResistance: number = 0.01; // Pendulum air-resistance coefficient
   private restitution: number = 0.5; // Coefficient of restitution for wall bounce (0=inelastic, 1=elastic)
+  private maxForce: number = 10.0; // Hard cap on cart force magnitude (N)
 
   // ── State variables ───────────────────────────────────────────────────────
   public cartPosition: number = 0; // Cart position (m)
@@ -63,8 +64,7 @@ export class InvertedPendulum {
    */
   update(force: number, dt: number): void {
     // ── Sanitise inputs ───────────────────────────────────────────────────
-    const maxForce = 10.0;
-    force = Math.max(-maxForce, Math.min(maxForce, force));
+    force = Math.max(-this.maxForce, Math.min(this.maxForce, force));
     dt = Math.min(dt, 0.02); // cap to 20 ms for numerical stability
 
     // ── Failure detection ─────────────────────────────────────────────────
@@ -257,6 +257,11 @@ export class InvertedPendulum {
     this.maxCartPosition = Math.max(1.0, halfLen);
   }
 
+  /** Update the hard cap on cart force magnitude (N). */
+  setMaxForce(maxF: number): void {
+    this.maxForce = Math.max(0, maxF);
+  }
+
   /** Return the current physical parameters. */
   getParameters(): {
     massCart: number;
@@ -265,6 +270,7 @@ export class InvertedPendulum {
     length: number;
     friction: number;
     trackHalfLength: number;
+    maxForce: number;
   } {
     return {
       massCart: this.massCart,
@@ -273,6 +279,7 @@ export class InvertedPendulum {
       length: this.length,
       friction: this.friction,
       trackHalfLength: this.maxCartPosition,
+      maxForce: this.maxForce,
     };
   }
 }

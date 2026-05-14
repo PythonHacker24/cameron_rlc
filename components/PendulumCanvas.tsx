@@ -1,4 +1,5 @@
 import React, { useRef, useEffect } from "react";
+import { useTheme } from "@/lib/theme";
 
 interface PendulumCanvasProps {
   cartPosition: number;
@@ -19,6 +20,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
   isAtBoundary = false,
   pendulumLength = 1.0,
 }) => {
+  const { theme } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -37,13 +39,79 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     const cy = H / 2;
 
     ctx.clearRect(0, 0, W, H);
+    const dark = theme === "dark";
+    const C = dark ? {
+      bg: "#050d1a",
+      bgInset: "#060e1c",
+      gridMinor: "#0e2442",
+      gridMajor: "#162e52",
+      axis: "#1a3858",
+      axisStrong: "#1e3d60",
+      centerLine: "#224c72",
+      centerLabel: "#4a80a8",
+      trackShadow: "#04090f",
+      trackFill: "#0e2442",
+      trackTop: "#4080c0",
+      trackBottom: "#1a3258",
+      rulerTickMinor: "#1e3858",
+      rulerLabel: "#4a7090",
+      slideFill: "#0e2442",
+      slideStroke: "#2a5080",
+      slideChannel: "#1e3a58",
+      stopFill: "#122448",
+      cartFill: "#0c2240",
+      cartStroke: "#3a78c0",
+      cartInner: "#1e3d5a",
+      cartCenter: "#1e3d58",
+      bolt: "#2a5278",
+      cartLabel: "#4a80b0",
+      mountFill: "#112848",
+      bob: "#4a80b0",
+      graphLabel: "#4a7898",
+      graphFaint: "#2a4a6a",
+      graphDim: "#3a6080",
+      graphLine: "#2e5e90",
+    } : {
+      // Light palette — strengthened for daylight visibility.
+      bg: "#f8fafc",            // slate-50 (was pure white — slight tint makes lines pop)
+      bgInset: "#eef2f7",
+      gridMinor: "#e2e8f0",     // slate-200 (was slate-100)
+      gridMajor: "#94a3b8",     // slate-400 (was slate-200)
+      axis: "#94a3b8",
+      axisStrong: "#475569",    // slate-600 — major axes
+      centerLine: "#475569",    // slate-600 — the centre datum dashes
+      centerLabel: "#1e293b",   // slate-800 — readable label
+      trackShadow: "#94a3b8",
+      trackFill: "#cbd5e1",     // slate-300 — track bed
+      trackTop: "#1d4ed8",      // blue-700
+      trackBottom: "#64748b",   // slate-500
+      rulerTickMinor: "#94a3b8",
+      rulerLabel: "#334155",    // slate-700 — strong, definitely readable
+      slideFill: "#cbd5e1",
+      slideStroke: "#475569",
+      slideChannel: "#94a3b8",
+      stopFill: "#bfdbfe",      // blue-200 — clearly visible end stops
+      cartFill: "#3b82f6",      // blue-500 fill (was pale blue-100 — cart should *read* as the focal object)
+      cartStroke: "#1e3a8a",    // blue-900 outline
+      cartInner: "#bfdbfe",     // blue-200 inner highlight
+      cartCenter: "#1e3a8a",
+      bolt: "#1e3a8a",
+      cartLabel: "#ffffff",     // white text on blue cart
+      mountFill: "#1d4ed8",
+      bob: "#1d4ed8",
+      graphLabel: "#334155",
+      graphFaint: "#94a3b8",
+      graphDim: "#475569",
+      graphLine: "#1d4ed8",
+    };
+
 
     // ── Background ──────────────────────────────────────────────
-    ctx.fillStyle = "#050d1a";
+    ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, W, H);
 
     // ── Minor grid (20 px) ──────────────────────────────────────
-    ctx.strokeStyle = "#0e2442";
+    ctx.strokeStyle = C.gridMinor;
     ctx.lineWidth = 0.5;
     for (let x = 0; x <= W; x += 20) {
       ctx.beginPath();
@@ -59,7 +127,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── Major grid (100 px) ─────────────────────────────────────
-    ctx.strokeStyle = "#162e52";
+    ctx.strokeStyle = C.gridMajor;
     ctx.lineWidth = 1;
     for (let x = 0; x <= W; x += 100) {
       ctx.beginPath();
@@ -75,7 +143,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── Center datum (vertical dashed) ──────────────────────────
-    ctx.strokeStyle = "#224c72";
+    ctx.strokeStyle = C.centerLine;
     ctx.lineWidth = 1;
     ctx.setLineDash([10, 6]);
     ctx.beginPath();
@@ -84,7 +152,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
     ctx.setLineDash([]);
 
-    ctx.fillStyle = "#4a80a8";
+    ctx.fillStyle = C.centerLabel;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = "center";
     ctx.fillText("x = 0", cx, 20);
@@ -96,15 +164,15 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     const trackW = W - 2 * trackPad;
 
     // Rail bed shadow
-    ctx.fillStyle = "#04090f";
+    ctx.fillStyle = C.trackShadow;
     ctx.fillRect(trackPad, trackY - trackH / 2 + 2, trackW, trackH);
 
     // Rail body
-    ctx.fillStyle = "#0e2442";
+    ctx.fillStyle = C.gridMinor;
     ctx.fillRect(trackPad, trackY - trackH / 2, trackW, trackH);
 
     // Rail top highlight — main structural line
-    ctx.strokeStyle = "#4080c0";
+    ctx.strokeStyle = C.trackTop;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(trackPad, trackY - trackH / 2);
@@ -112,7 +180,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
 
     // Rail bottom edge
-    ctx.strokeStyle = "#1a3258";
+    ctx.strokeStyle = C.trackBottom;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(trackPad, trackY + trackH / 2);
@@ -123,7 +191,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     for (let rx = trackPad; rx <= W - trackPad; rx += 40) {
       const isMajor = (rx - trackPad) % 200 === 0;
       const tickLen = isMajor ? 10 : 5;
-      ctx.strokeStyle = isMajor ? "#4080c0" : "#1e3858";
+      ctx.strokeStyle = isMajor ? C.trackTop : C.rulerTickMinor;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(rx, trackY + trackH / 2);
@@ -131,7 +199,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
       ctx.stroke();
       if (isMajor) {
         const label = ((rx - cx) / scale).toFixed(1);
-        ctx.fillStyle = "#4a7090";
+        ctx.fillStyle = C.rulerLabel;
         ctx.font = `8px ${MONO}`;
         ctx.textAlign = "center";
         ctx.fillText(`${label}`, rx, trackY + trackH / 2 + 22);
@@ -151,8 +219,8 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
 
     for (const { sx, hit } of stopDefs) {
       // Body fill
-      ctx.fillStyle = hit ? "#3b0a0a" : "#122448";
-      ctx.strokeStyle = hit ? "#ef4444" : "#4080c0";
+      ctx.fillStyle = hit ? "#3b0a0a" : C.stopFill;
+      ctx.strokeStyle = hit ? "#ef4444" : C.trackTop;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.rect(sx, trackY - stopH / 2, stopW, stopH);
@@ -186,8 +254,8 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     // Linear-guide slide block at cart base
     const slideH = 12;
     const slideW = cartW + 10;
-    ctx.fillStyle = "#0e2442";
-    ctx.strokeStyle = "#2a5080";
+    ctx.fillStyle = C.gridMinor;
+    ctx.strokeStyle = C.slideStroke;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.rect(cartX - slideW / 2, trackY - slideH, slideW, slideH);
@@ -195,7 +263,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
 
     // Slide block channel marks
-    ctx.strokeStyle = "#1e3a58";
+    ctx.strokeStyle = C.slideChannel;
     ctx.lineWidth = 1;
     for (const dy of [3, 6]) {
       ctx.beginPath();
@@ -205,8 +273,8 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // Cart main body — tint red when at boundary
-    ctx.fillStyle = isAtBoundary ? "#2a0a0a" : "#0c2240";
-    ctx.strokeStyle = isAtBoundary ? "#ef4444" : "#3a78c0";
+    ctx.fillStyle = isAtBoundary ? "#2a0a0a" : C.cartFill;
+    ctx.strokeStyle = isAtBoundary ? "#ef4444" : C.cartStroke;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.rect(cartX - cartW / 2, cartYc - cartH / 2, cartW, cartH);
@@ -214,7 +282,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
 
     // Body inner border (inset detail)
-    ctx.strokeStyle = isAtBoundary ? "#7f1d1d" : "#1e3d5a";
+    ctx.strokeStyle = isAtBoundary ? "#7f1d1d" : C.cartInner;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.rect(
@@ -226,7 +294,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.stroke();
 
     // Vertical centerline on cart
-    ctx.strokeStyle = "#1e3d58";
+    ctx.strokeStyle = C.cartCenter;
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -239,7 +307,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     const bR = 2.5;
     const bOffX = cartW / 2 - 9;
     const bOffY = cartH / 2 - 9;
-    ctx.strokeStyle = "#2a5278";
+    ctx.strokeStyle = C.bolt;
     ctx.lineWidth = 1;
     for (const [bx, by] of [
       [cartX - bOffX, cartYc - bOffY],
@@ -253,7 +321,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // Cart mass label
-    ctx.fillStyle = isAtBoundary ? "#f87171" : "#4a80b0";
+    ctx.fillStyle = isAtBoundary ? "#f87171" : C.cartLabel;
     ctx.font = `bold 11px ${MONO}`;
     ctx.textAlign = "center";
     ctx.fillText("M\u2081", cartX, cartYc + 5);
@@ -262,8 +330,8 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     const mountW = 22;
     const mountH = 10;
     const mountY = cartYc - cartH / 2;
-    ctx.fillStyle = "#112848";
-    ctx.strokeStyle = "#3a78c0";
+    ctx.fillStyle = C.mountFill;
+    ctx.strokeStyle = C.cartStroke;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.rect(cartX - mountW / 2, mountY - mountH, mountW, mountH);
@@ -318,7 +386,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     ctx.setLineDash([]);
 
     // Rod outer (thick, darker core)
-    ctx.strokeStyle = "#3a6080";
+    ctx.strokeStyle = C.graphDim;
     ctx.lineWidth = 5;
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -446,7 +514,7 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
 
     ctx.textAlign = "right";
     ctx.fillText(`scale: ${scale} px/m`, W - 10, H - 10);
-  }, [cartPosition, pendulumAngle, scale, controlForce, isAtBoundary, pendulumLength]);
+  }, [cartPosition, pendulumAngle, scale, controlForce, isAtBoundary, pendulumLength, theme]);
 
   return (
     <canvas

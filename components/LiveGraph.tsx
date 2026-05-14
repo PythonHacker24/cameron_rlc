@@ -1,4 +1,5 @@
 import React, { useRef, useEffect } from "react";
+import { useTheme } from "@/lib/theme";
 
 interface DataPoint {
   time: number;
@@ -32,6 +33,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
   xMin,
   xMax,
 }) => {
+  const { theme } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -44,9 +46,75 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     const H = canvas.height;
 
     ctx.clearRect(0, 0, W, H);
+    const dark = theme === "dark";
+    const C = dark ? {
+      bg: "#050d1a",
+      bgInset: "#060e1c",
+      gridMinor: "#0e2442",
+      gridMajor: "#162e52",
+      axis: "#1a3858",
+      axisStrong: "#1e3d60",
+      centerLine: "#224c72",
+      centerLabel: "#4a80a8",
+      trackShadow: "#04090f",
+      trackFill: "#0e2442",
+      trackTop: "#4080c0",
+      trackBottom: "#1a3258",
+      rulerTickMinor: "#1e3858",
+      rulerLabel: "#4a7090",
+      slideFill: "#0e2442",
+      slideStroke: "#2a5080",
+      slideChannel: "#1e3a58",
+      stopFill: "#122448",
+      cartFill: "#0c2240",
+      cartStroke: "#3a78c0",
+      cartInner: "#1e3d5a",
+      cartCenter: "#1e3d58",
+      bolt: "#2a5278",
+      cartLabel: "#4a80b0",
+      mountFill: "#112848",
+      bob: "#4a80b0",
+      graphLabel: "#4a7898",
+      graphFaint: "#2a4a6a",
+      graphDim: "#3a6080",
+      graphLine: "#2e5e90",
+    } : {
+      // Light palette — strengthened for daylight visibility.
+      bg: "#ffffff",
+      bgInset: "#f8fafc",
+      gridMinor: "#e2e8f0",     // slate-200
+      gridMajor: "#94a3b8",     // slate-400 — clearly visible
+      axis: "#94a3b8",
+      axisStrong: "#334155",    // slate-700 — primary axes pop
+      centerLine: "#475569",
+      centerLabel: "#1e293b",
+      trackShadow: "#94a3b8",
+      trackFill: "#cbd5e1",
+      trackTop: "#1d4ed8",
+      trackBottom: "#64748b",
+      rulerTickMinor: "#94a3b8",
+      rulerLabel: "#334155",
+      slideFill: "#cbd5e1",
+      slideStroke: "#475569",
+      slideChannel: "#94a3b8",
+      stopFill: "#bfdbfe",
+      cartFill: "#3b82f6",
+      cartStroke: "#1e3a8a",
+      cartInner: "#bfdbfe",
+      cartCenter: "#1e3a8a",
+      bolt: "#1e3a8a",
+      cartLabel: "#ffffff",
+      mountFill: "#1d4ed8",
+      bob: "#1d4ed8",
+      graphLabel: "#334155",    // slate-700 — high contrast labels
+      graphFaint: "#94a3b8",    // slate-400 — axis sub-ticks
+      graphDim: "#475569",      // slate-600 — secondary annotations
+      graphLine: "#1d4ed8",
+    };
+
 
     // ── Background ──────────────────────────────────────────────
-    ctx.fillStyle = "#050d1a";
+    ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, W, H);
 
     const pad = { top: 38, right: 22, bottom: 52, left: 62 };
@@ -54,11 +122,11 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     const pH = H - pad.top - pad.bottom;
 
     // ── Plot area background ─────────────────────────────────────
-    ctx.fillStyle = "#060e1c";
+    ctx.fillStyle = C.bgInset;
     ctx.fillRect(pad.left, pad.top, pW, pH);
 
     // ── Title (top-left, above plot) ─────────────────────────────
-    ctx.fillStyle = "#4a7898";
+    ctx.fillStyle = C.graphLabel;
     ctx.font = `500 11px ${MONO}`;
     ctx.textAlign = "left";
     ctx.fillText(title.toUpperCase(), pad.left, 26);
@@ -69,7 +137,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     // ── Empty state ──────────────────────────────────────────────
     if (!hasData) {
       // Minor grid even when empty
-      ctx.strokeStyle = "#0e2442";
+      ctx.strokeStyle = C.gridMinor;
       ctx.lineWidth = 0.5;
       for (let i = 0; i <= 8; i++) {
         const x = pad.left + (pW * i) / 8;
@@ -86,16 +154,16 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
         ctx.stroke();
       }
 
-      ctx.strokeStyle = "#1a3858";
+      ctx.strokeStyle = C.axis;
       ctx.lineWidth = 1;
       ctx.strokeRect(pad.left, pad.top, pW, pH);
 
-      ctx.fillStyle = "#2a4a6a";
+      ctx.fillStyle = C.graphFaint;
       ctx.font = `10px ${MONO}`;
       ctx.textAlign = "center";
       ctx.fillText("AWAITING DATA", pad.left + pW / 2, pad.top + pH / 2 + 4);
 
-      ctx.fillStyle = "#3a6080";
+      ctx.fillStyle = C.graphDim;
       ctx.font = `9px ${MONO}`;
       ctx.textAlign = "center";
       ctx.fillText(xLabel, pad.left + pW / 2, H - 8);
@@ -130,7 +198,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     const toY = (v: number) => pad.top + pH - ((v - minV) / rangeV) * pH;
 
     // ── Minor grid ───────────────────────────────────────────────
-    ctx.strokeStyle = "#0e2442";
+    ctx.strokeStyle = C.gridMinor;
     ctx.lineWidth = 0.5;
     const nXminor = 16;
     const nYminor = 10;
@@ -150,7 +218,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     }
 
     // ── Major grid ───────────────────────────────────────────────
-    ctx.strokeStyle = "#162e52";
+    ctx.strokeStyle = C.gridMajor;
     ctx.lineWidth = 1;
     const nXmajor = 8;
     const nYmajor = 6;
@@ -172,7 +240,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     // ── Zero reference line ──────────────────────────────────────
     if (minV < 0 && maxV > 0) {
       const zy = toY(0);
-      ctx.strokeStyle = "#2e5e90";
+      ctx.strokeStyle = C.graphLine;
       ctx.lineWidth = 1;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
@@ -181,19 +249,19 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      ctx.fillStyle = "#4a7898";
+      ctx.fillStyle = C.graphLabel;
       ctx.font = `9px ${MONO}`;
       ctx.textAlign = "right";
       ctx.fillText("0", pad.left - 6, zy + 3);
     }
 
     // ── Plot border ──────────────────────────────────────────────
-    ctx.strokeStyle = "#1e3d60";
+    ctx.strokeStyle = C.axisStrong;
     ctx.lineWidth = 1;
     ctx.strokeRect(pad.left, pad.top, pW, pH);
 
     // ── Y-axis tick labels ───────────────────────────────────────
-    ctx.fillStyle = "#4a7898";
+    ctx.fillStyle = C.graphLabel;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = "right";
     for (let i = 0; i <= nYmajor; i++) {
@@ -204,7 +272,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
 
       ctx.fillText(v.toFixed(1), pad.left - 8, y + 3);
 
-      ctx.strokeStyle = "#1e3d60";
+      ctx.strokeStyle = C.axisStrong;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(pad.left - 4, y);
@@ -213,7 +281,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     }
 
     // ── X-axis tick labels ───────────────────────────────────────
-    ctx.fillStyle = "#4a7898";
+    ctx.fillStyle = C.graphLabel;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = "center";
     for (let i = 0; i <= nXmajor; i++) {
@@ -221,7 +289,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
       const x = pad.left + (pW * i) / nXmajor;
       ctx.fillText(t.toFixed(1), x, pad.top + pH + 16);
 
-      ctx.strokeStyle = "#1e3d60";
+      ctx.strokeStyle = C.axisStrong;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x, pad.top + pH);
@@ -230,7 +298,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     }
 
     // ── Axis labels ──────────────────────────────────────────────
-    ctx.fillStyle = "#4a7898";
+    ctx.fillStyle = C.graphLabel;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = "center";
     ctx.fillText(xLabel, pad.left + pW / 2, H - 8);
@@ -239,7 +307,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     ctx.translate(13, pad.top + pH / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#4a7898";
+    ctx.fillStyle = C.graphLabel;
     ctx.font = `9px ${MONO}`;
     ctx.fillText(yLabel, 0, 0);
     ctx.restore();
@@ -305,7 +373,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
       ctx.font = `500 10px ${MONO}`;
       ctx.textAlign = "right";
       const tw = ctx.measureText(valStr).width + 10;
-      ctx.fillStyle = "#060e1c";
+      ctx.fillStyle = C.bgInset;
       ctx.fillRect(rightX - tw, topY - 11, tw, 15);
       ctx.fillStyle = color;
       ctx.fillText(valStr, rightX, topY);
@@ -321,6 +389,7 @@ const LiveGraph: React.FC<LiveGraphProps> = ({
     yMax,
     xMin,
     xMax,
+    theme,
   ]);
 
   return (

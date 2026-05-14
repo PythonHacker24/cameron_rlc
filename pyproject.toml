@@ -1,0 +1,7 @@
+[project]
+name = "cameron-rlc"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = ["torch (>=2.11.0,<3.0.0)", "numpy (>=2.4.4,<3.0.0)", "matplotlib (>=3.10.9,<4.0.0)"]

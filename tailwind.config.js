@@ -7,8 +7,21 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "system-ui", "-apple-system", "sans-serif"],
-        mono: ['"JetBrains Mono"', '"Courier New"', "monospace"],
+        sans: [
+          '"Google Sans Display"',
+          '"Google Sans"',
+          '"Product Sans"',
+          "Inter",
+          "system-ui",
+          "-apple-system",
+          "sans-serif",
+        ],
+        mono: [
+          '"Google Sans Code"',
+          '"JetBrains Mono"',
+          '"Courier New"',
+          "monospace",
+        ],
       },
       colors: {
         eng: {
