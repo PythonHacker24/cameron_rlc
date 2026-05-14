@@ -94,6 +94,13 @@ const DT = 0.02;             // 50 Hz training & control step
 // exploit wall bounces for free swing-up energy ("specification gaming").
 const TRAIN_WALL_M = 2.5;
 const CRASH_PENALTY = 1000;
+// Survival keeps the agent alive across full 500-step episodes.
+// Upright bonus prevents "oscillate at the bottom for free survival reward"
+// reward-hack by paying extra only above horizontal.  Terminate penalty
+// makes "die fast" the strictly worst option.
+const SURVIVAL_BONUS = 0.5;
+const UPRIGHT_BONUS = 3.0;     // scaled by max(0, cos θ)
+const TERMINATE_PENALTY = 500;
 
 // ── Reward shaping weights (PI piece) ─────────────────────────────────────────
 
@@ -109,12 +116,16 @@ export interface RewardWeights {
   beta: number;      // adaptive-blend sigmoid slope      — §7
 }
 
+// Moderate precision (×3 PDF default), knee 0.40, energy unchanged.  The
+// real fix for the "oscillate at hanging" reward-hack is the UPRIGHT_BONUS
+// applied in the rollout loop (see Python trainer); precision is just the
+// catch tightener.
 const DEFAULT_REWARD_WEIGHTS: RewardWeights = {
   wE: 1.0,
-  wTheta: 1.0, wThetaDot: 0.1,
-  wX: 0.05,    wXDot: 0.01,
+  wTheta: 3.0, wThetaDot: 0.3,
+  wX: 0.15,    wXDot: 0.03,
   wU: 0.001,   wDeltaU: 0.01,
-  thetaC: 0.30,
+  thetaC: 0.40,
   beta: 10.0,
 };
 
@@ -141,7 +152,7 @@ const DEFAULT_DR_CONFIG: DRConfig = {
   enabled: true,
   Mc:   { nominal: 1.0, lo: 0.85, hi: 1.15 },
   Mp:   { nominal: 0.1, lo: 0.85, hi: 1.15 },
-  L:    { nominal: 1.0, lo: 0.90, hi: 1.10 },
+  L:    { nominal: 0.5, lo: 0.90, hi: 1.10 },
   bc:   { lo: 0.05,  hi: 0.15 },
   bp:   { lo: 0.005, hi: 0.02 },
   Km:   { lo: 0.90,  hi: 1.10 },
@@ -272,14 +283,18 @@ export class PIPPODRController implements IController {
         const xObs  = raw.cartPosition + gaussian(0, episode.noiseXStd);
         const thObs = raw.pendulumAngle + gaussian(0, episode.noiseThetaStd);
 
+        // ΔE in the observation uses NOMINAL (Mp, L) — must match what the
+        // inference path (compute()) computes, otherwise the agent depends on
+        // a feature it cannot reproduce at deployment.  The reward (below)
+        // still uses the episode's true DR'd physics, which is correct.
         const s = this.buildObservation(
           xObs,
           raw.cartVelocity,
           thObs,
           raw.pendulumAngularVelocity,
           prevU,
-          episode.Mp,
-          episode.L,
+          MP_NOMINAL,
+          L_NOMINAL,
         );
 
         // Actor: get raw mean μ (unbounded)
@@ -317,12 +332,21 @@ export class PIPPODRController implements IController {
         // smoothness penalty (so Km/delay leak through into the gradient too).
         let reward = this.computeReward(next, uApplied, prevU, episode.Mp, episode.L);
 
+        // Per-step survival bonus + upright bonus.  Survival keeps long
+        // episodes worth living; UPRIGHT_BONUS makes near-upright strictly
+        // more rewarding than oscillating near hanging.
+        reward += SURVIVAL_BONUS;
+        reward += UPRIGHT_BONUS * Math.max(0, Math.cos(next.pendulumAngle));
+
         // Anti reward-hacking: large negative penalty if the cart ever reaches
         // the physical wall.  Combined with TRAIN_WALL_M just outside the 2.4 m
         // termination boundary, the agent dies *before* it can touch the wall
         // — so it cannot learn to bounce the pendulum off the boundary to gain
         // free swing-up energy ("specification gaming").
         if (next.isAtBoundary) reward -= CRASH_PENALTY;
+        // One-shot termination penalty — racing to escape is strictly worse
+        // than parking still or attempting swing-up.
+        if (terminated) reward -= TERMINATE_PENALTY;
         curEpReward += reward;
 
         buffer.push({
@@ -352,8 +376,8 @@ export class PIPPODRController implements IController {
         lastRaw.pendulumAngle + gaussian(0, episode.noiseThetaStd),
         lastRaw.pendulumAngularVelocity,
         prevU,
-        episode.Mp,
-        episode.L,
+        MP_NOMINAL,
+        L_NOMINAL,
       );
       const { out: lastV } = this.critic.forward(lastS);
       const { returns, advantages } = this.gae(buffer, lastV[0]);

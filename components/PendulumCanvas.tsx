@@ -369,7 +369,12 @@ const PendulumCanvas: React.FC<PendulumCanvasProps> = ({
     }
 
     // ── PENDULUM ROD ────────────────────────────────────────────
-    const rodLen = pendulumLength * scale * 2.5;
+    // Visual-only scale multiplier — render the rod ~40% longer than the
+    // physical length so a 0.5 m policy-trained pendulum reads visually as a
+    // more substantial demo prop.  Physics is unaffected; the trained policy
+    // still receives the true L=0.5 m via the controller / simulator.
+    const VISUAL_ROD_SCALE = 5.5;   // 120% longer than the original 2.5
+    const rodLen = pendulumLength * scale * VISUAL_ROD_SCALE;
     const pivotX = cartX;
     const pivotY = mountY - mountH;
     const bobX = pivotX + Math.sin(pendulumAngle) * rodLen;

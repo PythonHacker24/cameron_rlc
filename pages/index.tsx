@@ -427,7 +427,7 @@ export default function Home() {
  const applyHardwarePreset = useCallback(() => {
  setCartMass(1.0);
  setPendulumMass(0.1);
- setPendulumLength(1.0);
+ setPendulumLength(0.5);
  setTrackFriction(0.10);
  setWallRestitution(0.0);
  setAirResistance(0.01);
@@ -474,11 +474,12 @@ export default function Home() {
  pippodrRef.current = new PIPPODRController();
  }
  controllerRef.current = pippodrRef.current;
- // Nominal training physics (PDF §4.1 Table 1) — L bumped to 1.0 m for
- // gentler swing-up dynamics; the policy is trained on this nominal.
+ // Nominal training physics (PDF §4.1 Table 1) — L = 0.5 m so the
+ // pendulum's natural-period travel (~2.3 m) fits inside the 2.4 m
+ // training kill-zone and natural-period swing-up is feasible.
  setCartMass(1.0);
  setPendulumMass(0.1);
- setPendulumLength(1.0);
+ setPendulumLength(0.5);
  setTrackFriction(0.10);
  setWallRestitution(0.0);
  setAirResistance(0.01);
