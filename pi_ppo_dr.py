@@ -44,8 +44,10 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
-SEED = 7         # was 42 — different seed to escape the policy-collapse basin
-                 # the previous run found.  PPO is non-deterministic w.r.t. seed.
+SEED = 42        # back to 42 (original PDF) — the new reward shape (with
+                 # UPRIGHT_BONUS) gives a much stronger gradient toward
+                 # upright balance, so previous seed-induced collapse is
+                 # unlikely to recur.
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
@@ -57,7 +59,11 @@ else:
     DEVICE = "cpu"
 
 # ── Hyperparameters ──────────────────────────────────────────────────────────
-TOTAL_TIMESTEPS = 1_500_000
+TOTAL_TIMESTEPS = 1_500_000 # full cold-start budget — we discovered the
+                            # previous policy was reward-hacking the survival
+                            # bonus by oscillating at the bottom, so a fresh
+                            # start under the new UPRIGHT_BONUS reward is the
+                            # right move.
 N_STEPS = 4096            # rollout length per update
 N_EPOCHS = 10             # PPO update epochs
 BATCH_SIZE = 64
@@ -89,15 +95,26 @@ CHECKPOINT_EVERY = 25
 CKPT_PATH = "pi_ppo_dr_weights.json"
 BEST_PATH = "pi_ppo_dr_weights.best.json"
 
+# Warm-start: optionally load existing weights as a starting point so we can
+# fine-tune (e.g. tighten the balance phase) without losing the discovered
+# swing-up behavior.  Set to None for a cold-start (random init) run.
+RESUME_FROM = None    # cold start — the previous policy is reward-hacking
+                      # the survival bonus and fine-tuning won't break it out
+
 # Reward-shaping weights (must match defaults in PIPPODRController.ts)
 W_E = 1.0
-W_THETA = 1.0
-W_THETA_DOT = 0.1
-W_X = 0.05
-W_X_DOT = 0.01
+# Moderate precision boost (×3 of the PDF default).  Was ×10 for fine-tuning;
+# for cold start we don't want precision penalties to overpower the swing-up
+# energy injection in mid-swing.  The new UPRIGHT_BONUS provides most of the
+# pull toward upright; precision is only there to tighten the local catch.
+W_THETA = 3.0
+W_THETA_DOT = 0.3
+W_X = 0.15
+W_X_DOT = 0.03
 W_U = 0.001
 W_DELTA_U = 0.01
-THETA_C = 0.30            # blend knee (rad)        — §7
+# Knee widened from 0.30 → 0.40 rad so precision regulator engages at ~23°.
+THETA_C = 0.40
 BETA = 10.0               # blend sigmoid slope     — §7
 
 # Physical constants
@@ -120,7 +137,7 @@ class DRRangeAbs:
 DR = {
     "Mc":     DRRangeMul(nominal=1.0, lo=0.85, hi=1.15),
     "Mp":     DRRangeMul(nominal=0.1, lo=0.85, hi=1.15),
-    "L":      DRRangeMul(nominal=1.0, lo=0.90, hi=1.10),
+    "L":      DRRangeMul(nominal=0.5, lo=0.90, hi=1.10),
     "bc":     DRRangeAbs(lo=0.05,  hi=0.15),       # cart friction       N·s/m
     "bp":     DRRangeAbs(lo=0.005, hi=0.02),       # pendulum damping    N·m·s/rad
     "Km":     DRRangeAbs(lo=0.90,  hi=1.10),       # motor gain          unitless
@@ -146,13 +163,33 @@ MAX_ANG_VEL = 20.0
 TERMINATE_X = 2.4         # episode ends if |x| > this (§9)
 CRASH_PENALTY = 1000.0    # subtracted from reward if the cart ever hits a wall
 
+# Reward-shaping safeguards against the "die fast" exploit.
+#
+# Without these, the agent prefers a short episode (it dies quickly to avoid
+# accumulating per-step energy penalties).  SURVIVAL_BONUS makes every alive
+# step intrinsically worth something so survival itself is rewarded; the
+# successful swing-up + balance is the only policy that yields a *positive*
+# return.  TERMINATE_PENALTY (one-shot, on cart escape) ensures racing to
+# the boundary is strictly worse than parking still.
+SURVIVAL_BONUS = 0.5      # per step
+# Upright bonus — explicit positive reward for being in the upper half-plane.
+# Without this, the agent reward-hacked the survival bonus by oscillating at
+# the bottom (every alive step pays +0.5 from survival, and the energy penalty
+# at low-amplitude hanging oscillation is small enough that it nets positive).
+# Scaled by max(0, cos θ) so the bonus only pays out above horizontal — at
+# upright = +3.0/step, at horizontal = 0, hanging = 0.  A 500-step balanced
+# episode now earns +1500 from this term alone, dwarfing the +125 the agent
+# was getting from oscillating at the bottom.
+UPRIGHT_BONUS = 3.0       # per step, scaled by max(0, cos θ)
+TERMINATE_PENALTY = 500.0 # one-shot on |x|>TERMINATE_X (NOT on truncation)
+
 
 # ── Cell 1 ── Physics (port of lib/InvertedPendulum.ts) ──────────────────────
 @dataclass
 class Pendulum:
     Mc: float = 1.0
     Mp: float = 0.1
-    L: float = 1.0           # nominal rod length (m) — bumped for forgiving dynamics
+    L: float = 0.5           # nominal rod length (m)
     bc: float = 0.10         # cart friction
     bp: float = 0.01         # pendulum joint damping
     Fmax: float = F_MAX
@@ -314,13 +351,21 @@ def observe(p: Pendulum, prev_u: float, noise_th: float, noise_x: float) -> np.n
     §2.1 augmented observation:
         s_t^aug = [x, ẋ, cos θ, sin θ, θ̇, ΔE, u_{t-1}]
     Sensor noise (Gaussian) is added to x and θ only.
-    Must match PIPPODRController.buildObservation exactly.
+
+    IMPORTANT — ΔE is computed using the *nominal* (M_p, L), NOT the episode's
+    DR'd values.  Rationale: at inference time the controller does not know
+    the true plant parameters; it can only compute ΔE against a nominal model.
+    Using nominal physics here too eliminates the sim-to-real distribution
+    shift that would otherwise let the agent depend on a feature it cannot
+    obtain at deployment.  The *reward* still uses true (DR'd) physics —
+    that's how we measure real performance.
     """
     x_obs  = p.x  + (np.random.normal(0.0, noise_x)  if noise_x  > 0 else 0.0)
     th_obs = p.th + (np.random.normal(0.0, noise_th) if noise_th > 0 else 0.0)
 
-    E_obs = 0.5 * p.Mp * p.L**2 * p.thd * p.thd + p.Mp * G * p.L * (1 + math.cos(th_obs))
-    Eup   = 2 * p.Mp * G * p.L
+    E_obs = 0.5 * MP_NOMINAL * L_NOMINAL**2 * p.thd * p.thd \
+            + MP_NOMINAL * G * L_NOMINAL * (1 + math.cos(th_obs))
+    Eup   = 2 * MP_NOMINAL * G * L_NOMINAL
     dE    = E_obs - Eup
 
     return np.array([
@@ -459,6 +504,38 @@ def train():
     print("=" * 70)
 
     model = ActorCritic().to(DEVICE)
+
+    # Warm-start from existing weights if RESUME_FROM is set.  PyTorch's
+    # nn.Linear stores weight as [outDim, inDim], and the JSON flattens it
+    # row-major, so reshape((outDim, inDim)) reconstructs it losslessly.
+    if RESUME_FROM:
+        import os
+        if os.path.exists(RESUME_FROM):
+            with open(RESUME_FROM) as f:
+                _resume = json.load(f)
+            for linear, p in zip(
+                [model.a1, model.a2, model.a3], _resume["actor"]
+            ):
+                W = np.array(p["W"], dtype=np.float32).reshape(
+                    linear.out_features, linear.in_features
+                )
+                b = np.array(p["b"], dtype=np.float32)
+                linear.weight.data.copy_(torch.from_numpy(W))
+                linear.bias.data.copy_(torch.from_numpy(b))
+            for linear, p in zip(
+                [model.c1, model.c2, model.c3], _resume["critic"]
+            ):
+                W = np.array(p["W"], dtype=np.float32).reshape(
+                    linear.out_features, linear.in_features
+                )
+                b = np.array(p["b"], dtype=np.float32)
+                linear.weight.data.copy_(torch.from_numpy(W))
+                linear.bias.data.copy_(torch.from_numpy(b))
+            model.log_std.data.fill_(float(_resume["logStd"]))
+            print(f"  ↻ resumed from {RESUME_FROM}  (logStd={_resume['logStd']:.3f})")
+        else:
+            print(f"  ⚠ RESUME_FROM={RESUME_FROM} not found — cold start")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, eps=1e-5)
 
     n_updates = TOTAL_TIMESTEPS // N_STEPS
@@ -516,12 +593,26 @@ def train():
             # Reward uses what actually hit the plant (u_applied), so Km and
             # delay leak into the smoothness gradient as well.
             reward = compute_reward(ep.plant, u_applied, prev_u)
+            # Per-step survival bonus — staying alive is intrinsically worth
+            # something.  Without this, the agent prefers a *short* episode
+            # because each step accumulates ~−3.85 of energy penalty when the
+            # pendulum is hanging, so "die fast" beats "park forever".
+            reward += SURVIVAL_BONUS
+            # Upright bonus — pays out only in the upper half-plane, peaks at
+            # θ = 0.  Forces the agent to actually reach upright rather than
+            # gaming the survival bonus by oscillating at the bottom.
+            reward += UPRIGHT_BONUS * max(0.0, math.cos(ep.plant.th))
             # Anti reward-hacking: heavy crash penalty if the cart touched the
             # wall this step.  Combined with the wall sitting at 2.5 m and the
             # termination boundary at 2.4 m, the agent learns the boundary is
             # a hard "lose" — it can't bounce off the wall for free energy.
             if ep.plant.at_boundary:
                 reward -= CRASH_PENALTY
+            # One-shot termination penalty — makes "race to terminate" strictly
+            # worse than parking still or attempting swing-up.  Applied only on
+            # cart-escape termination, NOT on the step-cap truncation.
+            if terminated:
+                reward -= TERMINATE_PENALTY
             buf_rewards[step] = reward
             buf_dones[step] = float(done)
 

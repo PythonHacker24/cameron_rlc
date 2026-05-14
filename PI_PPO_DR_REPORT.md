@@ -73,7 +73,7 @@ At the start of every episode, physical parameters are sampled from a uniform di
 |---|---|---|---|
 | Cart Mass | M_c | 1.0 kg | U(0.85 M_c^nom, 1.15 M_c^nom) |
 | Pendulum Mass | M_p | 0.1 kg | U(0.85 M_p^nom, 1.15 M_p^nom) |
-| Pendulum Length | L | 1.0 m | U(0.90 L^nom, 1.10 L^nom) |
+| Pendulum Length | L | 0.5 m | U(0.90 L^nom, 1.10 L^nom) |
 | Cart Friction | b_c | 0.10 N·s/m | U(0.05, 0.15) N·s/m |
 | Pendulum Joint Damping | b_p | 0.01 N·m·s/rad | U(0.005, 0.02) N·m·s/rad |
 | Motor Gain | K_m | 1.0 | U(0.90, 1.10) |

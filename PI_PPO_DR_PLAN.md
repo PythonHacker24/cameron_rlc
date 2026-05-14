@@ -59,7 +59,7 @@ private drRanges = {             // DR uniform ranges (PPT Table)
   Fmax: [0.90, 1.10],
   b:   [0.70, 1.30],
 };
-private nominal = { Mc: 1.0, Mp: 0.1, L: 1.0, Fmax: 10.0, b: 0.1 };
+private nominal = { Mc: 1.0, Mp: 0.1, L: 0.5, Fmax: 10.0, b: 0.1 };
 ```
 
 #### a) `normaliseState` — augmented

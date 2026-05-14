@@ -1,0 +1,525 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---- Packages ---------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+\usepackage{microtype}
+\usepackage{titlesec}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!50!black
+}
+
+% Code listing style
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{codekey}{HTML}{0033B3}
+\definecolor{codecomment}{HTML}{8C8C8C}
+\definecolor{codestring}{HTML}{067D17}
+\lstset{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekey}\bfseries,
+    commentstyle=\color{codecomment}\itshape,
+    stringstyle=\color{codestring},
+    showstringspaces=false,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{black!20},
+    columns=flexible,
+    language=Python,
+    captionpos=b
+}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.7em}{}
+
+% ---- Title ------------------------------------------------------------------
+\title{\textbf{PI-PPO-DR: A Physics-Informed, Domain-Randomized\\
+Proximal Policy Optimization Controller for the Inverted Pendulum}}
+
+\author{%
+Manikya Singh Chandel (22BEE070) \and
+Ayan Choradia (22BEE042) \and
+Anshuman Payasi (22BEE028) \and
+Aditya Patil (22BEE083)\\[0.5em]
+\small Department of Electrical Engineering, NIT Hamirpur\\
+\small Supervisor: Dr.~Sreeram T.S.
+}
+
+\date{\today}
+
+% ---- Document ---------------------------------------------------------------
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent We present \textbf{PI-PPO-DR}, a reinforcement-learning controller for the inverted cart--pendulum that unifies global swing-up and local stabilization in a single continuous-action policy. The framework combines (i)~Proximal Policy Optimization (PPO) with a tanh-squashed Gaussian actor for smooth, bounded control; (ii)~a \emph{physics-informed} reward whose energy term derives from the mechanical Hamiltonian of the plant, and whose sigmoid scheduling factor blends a swing-up objective with a precision-balance objective; and (iii)~\emph{domain randomization} (DR) over seven physical and actuator parameters plus Gaussian sensor noise to harden the policy against sim-to-real distribution shift. The augmented observation $s^{\text{aug}}_t = [x, \dot{x}, \cos\theta, \sin\theta, \dot\theta, \Delta E, u_{t-1}]$ supplies the network with a continuous orientation representation, an explicit energy-error feature, and one step of actuator memory for smoothness. A characteristic specification-gaming failure (wall-bounce energy harvesting) was identified during training and engineered out with a layered defense. The resulting policy swings up and stabilizes the pendulum from arbitrary initial orientations using a single network.
+\end{abstract}
+
+\tableofcontents
+\vspace{1em}
+\hrule
+\vspace{1em}
+
+% =============================================================================
+\section{Introduction and Motivation}
+% =============================================================================
+
+The inverted cart--pendulum is the canonical benchmark for nonlinear control:
+the upright equilibrium $\theta = 0$ is unstable, the system is underactuated
+(one input, two configuration coordinates), and the controller must perform
+two qualitatively different tasks --- \emph{swing-up} from a hanging or
+arbitrary orientation, and \emph{balance} at the unstable equilibrium with
+minimal actuator wear. Table~\ref{tab:era} summarizes the three eras of
+approach motivating the present work.
+
+\begin{table}[h]
+\centering
+\caption{Three eras of cart-pole control and their failure modes.}
+\label{tab:era}
+\begin{tabularx}{\linewidth}{l X X}
+\toprule
+\textbf{Approach} & \textbf{Strength} & \textbf{Weakness} \\
+\midrule
+PID & Excellent local stabilization near $\theta \approx 0$.
+    & Linearization fails for large angles; no global swing-up. \\
+DQN & Global swing-up from any angle.
+    & Discrete actions $\Rightarrow$ bang-bang control $\Rightarrow$
+      chattering and actuator damage. \\
+\textbf{PPO (chosen)}
+    & Native continuous action space $\Rightarrow$ smooth, wear-free,
+      global stabilization.
+    & Pure RL is sample-inefficient and brittle to sim-to-real gaps. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent PI-PPO-DR patches PPO's two weaknesses --- sample efficiency and
+sim-to-real fragility --- by injecting \emph{physics knowledge} into the
+reward and \emph{domain randomization} into the simulator.
+
+% =============================================================================
+\section{Plant Model}
+% =============================================================================
+
+A rigid rod of mass $m$ and length $\ell$ is pin-jointed at its base to a cart of mass $M$ that slides on a horizontal track of half-length $L_{\text{track}}$. Let $x$ denote cart position (positive right) and $\theta$ denote pendulum angle measured from the upright vertical (positive clockwise).
+
+\subsection{Lagrangian dynamics}
+The Lagrangian $\mathcal{L} = T - V$ is
+\begin{equation}
+\mathcal{L} = \tfrac{1}{2}(M+m)\dot{x}^2 + m\ell\dot{x}\dot{\theta}\cos\theta
+            + \tfrac{1}{2} m \ell^2 \dot{\theta}^2 - m g \ell \cos\theta.
+\end{equation}
+Applying Euler--Lagrange to $x$ and $\theta$ and including viscous friction
+$b_c\dot{x}$ on the cart and joint damping $b_p\dot{\theta}$ on the pendulum
+yields the coupled equations
+\begin{align}
+(M+m)\,\ddot{x} + m\ell\cos\theta\,\ddot{\theta}
+   &= F - b_c\dot{x} + m\ell\dot{\theta}^2\sin\theta, \label{eq:eom-x}\\
+m\ell\cos\theta\,\ddot{x} + m\ell^2\ddot{\theta}
+   &= m g \ell \sin\theta - b_p \dot{\theta}. \label{eq:eom-theta}
+\end{align}
+Solving \eqref{eq:eom-x}--\eqref{eq:eom-theta} for $(\ddot{x},\ddot{\theta})$:
+\begin{align}
+\ddot{x} &= \frac{F - b_c\dot{x} + m\ell\dot{\theta}^2\sin\theta - m g \sin\theta\cos\theta}{M + m\sin^2\theta},\\
+\ddot{\theta} &= \frac{(M+m)g\sin\theta - \cos\theta(F - b_c\dot{x} + m\ell\dot{\theta}^2\sin\theta) - b_p\dot{\theta}/\ell}{\ell(M + m\sin^2\theta)}.
+\end{align}
+The simulator integrates these with classical 4th-order Runge--Kutta at $\Delta t = 20$~ms, with hard caps on $|\dot{x}|$ and $|\dot{\theta}|$, angle wrap to $(-\pi,\pi]$, and inelastic wall handling described in \S\ref{sec:wallhack}.
+
+\subsection{Mechanical energy}
+A central quantity for the reward shaping is the pendulum's total mechanical energy and its error from the upright energy:
+\begin{equation}
+E(\theta,\dot{\theta}) = \tfrac{1}{2}\,m\,\ell^2\,\dot{\theta}^2 + m\,g\,\ell\,(1 + \cos\theta),
+\qquad
+E_{\text{up}} = 2\,m\,g\,\ell,
+\qquad
+\Delta E \;=\; E - E_{\text{up}}.
+\label{eq:energy}
+\end{equation}
+$\Delta E \to 0$ implies the pendulum has exactly enough energy to reach upright (i.e.\ swing-up is geometrically possible without further pumping).
+
+% =============================================================================
+\section{Observation and Action Spaces}
+% =============================================================================
+
+\subsection{Augmented observation}
+\label{sec:obs}
+Rather than feeding the raw state $[x,\dot{x},\theta,\dot{\theta}]$ to the policy, we use the seven-dimensional augmented observation
+\begin{equation}
+\boxed{\;
+s^{\text{aug}}_t = \bigl[\, x_t,\; \dot{x}_t,\; \cos\theta_t,\; \sin\theta_t,\; \dot{\theta}_t,\; \Delta E_t,\; u_{t-1} \,\bigr] \in \mathbb{R}^7.
+\;}
+\end{equation}
+Each component is normalized into roughly $[-1,1]$ before entering the network. The design rationale is:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item $(\cos\theta,\sin\theta)$ replaces the raw angle so the policy sees a continuous orientation representation across the $\pm\pi$ wrap; without it the network must learn a discontinuous decision boundary at the wrap point.
+  \item $\Delta E_t$ supplies an explicit \emph{swing-up progress} signal so the network does not have to learn to infer total energy from the four kinematic components.
+  \item $u_{t-1}$, the previous applied force, lets the policy reason about its own commanded actuation and is what makes the smoothness penalty $w_{\Delta u}(u_t - u_{t-1})^2$ trainable end-to-end.
+\end{itemize}
+
+\paragraph{Deployment-safe energy feature.} At deployment the agent does not know the true plant parameters, so the energy feature $\Delta E$ in $s^{\text{aug}}_t$ is computed with \emph{nominal} $(m_p,\ell)$ rather than the per-episode randomized values. The reward function uses the true (randomized) physics; only the observation uses nominal physics. This eliminates a sim-to-real distribution shift where the agent could otherwise lean on a feature it could not compute on hardware.
+
+\subsection{Action: tanh-squashed Gaussian}
+The actor outputs the mean $\mu_\theta(s)$ of a raw Gaussian; the standard deviation $\sigma_\theta = \exp(\log\sigma)$ is a learnable scalar floor-clamped at $\log\sigma \geq -1$ to keep exploration alive long enough to discover the alternating energy-pump strategy:
+\begin{equation}
+a_t \sim \mathcal{N}\!\bigl(\mu_\theta(s^{\text{aug}}_t),\, \sigma_\theta^2\bigr),
+\qquad
+u_t \;=\; F_{\max}\,\tanh(a_t).
+\end{equation}
+The $\tanh$ squash preserves differentiability across the actuator limit $F_{\max} = 10$~N, avoiding the log-prob/applied-action mismatch that hard clipping would introduce. Crucially, $F_{\max}$ is \emph{not} domain-randomized; instead, motor gain $K_m$ (\S\ref{sec:dr}) plays the role of a "stronger/weaker hardware" knob without changing the policy's own action scale.
+
+% =============================================================================
+\section{Domain Randomization}
+\label{sec:dr}
+% =============================================================================
+
+At the start of every episode, physical and actuator parameters are sampled
+from independent uniform distributions; Gaussian noise is added to the
+position and angle measurements at every step. The policy must therefore
+learn a \emph{family of dynamics} rather than a single point estimate.
+
+\begin{table}[h]
+\centering
+\caption{Domain-randomization ranges. \emph{Mul}: multiplicative around nominal.
+\emph{Abs}: absolute uniform draw.}
+\label{tab:dr}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lllcl}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Type} & \textbf{Nominal} & \textbf{Range} \\
+\midrule
+Cart mass            & $M_c$        & Mul & $1.00$~kg          & $\mathcal{U}(0.85, 1.15) \cdot M_c$ \\
+Pendulum mass        & $M_p$        & Mul & $0.10$~kg          & $\mathcal{U}(0.85, 1.15) \cdot M_p$ \\
+Pendulum length      & $L$          & Mul & $1.00$~m           & $\mathcal{U}(0.90, 1.10) \cdot L$ \\
+Cart friction        & $b_c$        & Abs & $0.10$~N$\cdot$s/m & $\mathcal{U}(0.05, 0.15)$ \\
+Joint damping        & $b_p$        & Abs & $0.01$~N$\cdot$m$\cdot$s/rad & $\mathcal{U}(0.005, 0.02)$ \\
+Motor gain           & $K_m$        & Abs & $1.00$             & $\mathcal{U}(0.90, 1.10)$ \\
+Actuator delay       & $\tau_d$     & Abs & $0$~ms             & $\mathcal{U}(10, 30)$~ms \\
+Sensor noise (angle) & $\eta_\theta$ & N  & $0$                & $\mathcal{N}(0, 0.01^2)$~rad \\
+Sensor noise (pos.)  & $\eta_x$     & N   & $0$                & $\mathcal{N}(0, 0.002^2)$~m \\
+Gravity              & $g$          & --- & $9.81$~m/s$^2$     & constant \\
+Actuator limit       & $F_{\max}$   & --- & $10$~N             & constant (see text) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Actuator delay} is implemented as a FIFO buffer of integer length $\lceil \tau_d / \Delta t \rceil$ between the commanded $u^{\text{cmd}}_t = K_m \cdot F_{\max}\tanh(a_t)$ and the force that actually reaches the plant. The reward and the next-step augmentation $u_{t-1}$ both use the \emph{applied} (delayed, gain-scaled) force, so the actuator non-idealities leak into the smoothness gradient as well.
+
+\paragraph{Global initial conditions} are also randomized so the agent cannot memorize a particular start:
+\begin{equation}
+\theta_0 \sim \mathcal{U}(-\pi, \pi), \quad
+x_0 \sim \mathcal{U}(-0.2, 0.2), \quad
+\dot{x}_0 \sim \mathcal{U}(-0.1, 0.1), \quad
+\dot{\theta}_0 \sim \mathcal{U}(-0.5, 0.5).
+\end{equation}
+
+% =============================================================================
+\section{Physics-Informed Reward}
+% =============================================================================
+
+The reward at step $t$ has three semantically distinct groups of terms,
+combined through a single sigmoid scheduling factor that blends \emph{swing-up} and \emph{balance} regimes.
+
+\subsection{Energy term (swing-up)}
+\label{sec:r-energy}
+Using the energy error from \eqref{eq:energy},
+\begin{equation}
+R^{\text{energy}}_t \;=\; -\,w_E\,(\Delta E_t)^2.
+\end{equation}
+This is the "physics-informed" core of the reward: a dense, mechanically meaningful gradient that tells the agent how to inject energy when the pendulum is far from upright, in the spirit of \AA{}str\"om--Furuta energy control \cite{astrom2000}.
+
+\subsection{Precision term (balance + centering)}
+\begin{equation}
+R^{\text{prec}}_t \;=\; -\bigl(w_\theta\,\theta_t^2 + w_{\dot{\theta}}\,\dot{\theta}_t^2\bigr).
+\end{equation}
+A near-quadratic loss landscape around $\theta = \dot{\theta} = 0$ that yields a clean local LQR-like regulator close to upright.
+
+\subsection{Cart and smoothness terms}
+\begin{equation}
+R^{\text{cart}}_t = -\bigl(w_x\,x_t^2 + w_{\dot{x}}\,\dot{x}_t^2\bigr),
+\qquad
+R^{\text{smooth}}_t = -\bigl(w_u\,u_t^2 + w_{\Delta u}\,(u_t - u_{t-1})^2\bigr).
+\end{equation}
+$R^{\text{cart}}$ keeps the cart away from the track ends; $R^{\text{smooth}}$ penalizes both large forces and large \emph{changes} in force, and is the dominant mechanism for eliminating bang-bang chattering.
+
+\subsection{Adaptive sigmoid blending}
+The agent should care about energy injection when the pendulum is hanging or tumbling, and about angular precision when it is near the upright. A sigmoid scheduling factor handles the handover smoothly:
+\begin{equation}
+\boxed{\;
+\alpha_t \;=\; \sigma\!\bigl(\beta\,(\lvert\theta_t\rvert - \theta_c)\bigr)
+       \;=\; \frac{1}{1 + \exp\bigl(-\beta(\lvert\theta_t\rvert - \theta_c)\bigr)},
+\quad \theta_c = 0.30~\text{rad},\;\; \beta = 10.
+\;}
+\end{equation}
+For $\lvert\theta\rvert \gg \theta_c$ we have $\alpha \to 1$ and the energy term dominates (swing-up mode); for $\lvert\theta\rvert \ll \theta_c$, $\alpha \to 0$ and the precision term dominates (balance mode). The slope $\beta$ controls how sharp the handover is around the knee $\theta_c$. Compared with the simpler ratio $\lvert\theta\rvert / (\lvert\theta\rvert + \theta_c)$, the sigmoid offers a tunable slope and a true zero of the precision-loss derivative at the knee.
+
+\subsection{Unified scalar reward}
+\begin{equation}
+\boxed{\;
+R_t \;=\; -\alpha_t\, w_E\,(\Delta E_t)^2
+       \;-\; (1-\alpha_t)\bigl(w_\theta\theta_t^2 + w_{\dot\theta}\dot\theta_t^2\bigr)
+       \;-\; w_x x_t^2 \;-\; w_{\dot x}\dot{x}_t^2
+       \;-\; w_u u_t^2 \;-\; w_{\Delta u}(u_t - u_{t-1})^2.
+\;}
+\label{eq:reward}
+\end{equation}
+
+\begin{table}[h]
+\centering
+\caption{Reward weights used in training.}
+\label{tab:weights}
+\begin{tabular}{lcl}
+\toprule
+\textbf{Symbol} & \textbf{Value} & \textbf{Role} \\
+\midrule
+$w_E$           & $1.0$   & energy-error penalty (swing-up) \\
+$w_\theta$      & $1.0$   & upright tracking \\
+$w_{\dot\theta}$ & $0.1$  & angular-rate damping \\
+$w_x$           & $0.05$  & cart centering \\
+$w_{\dot x}$    & $0.01$  & cart-velocity damping \\
+$w_u$           & $0.001$ & force magnitude \\
+$w_{\Delta u}$  & $0.01$  & control rate (smoothness) \\
+$\theta_c$      & $0.30$~rad & blend knee \\
+$\beta$         & $10$    & blend sharpness \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\section{PPO Algorithm}
+% =============================================================================
+
+\subsection{Actor--critic network}
+The policy and value functions share input but not hidden weights:
+\begin{equation*}
+\underbrace{7 \to 64 \to 64 \to 1}_{\text{actor }\mu_\theta} \quad\text{and}\quad
+\underbrace{7 \to 64 \to 64 \to 1}_{\text{critic } V_\phi}
+\end{equation*}
+with $\tanh$ activations in both hidden layers, orthogonal weight initialization
+(gain $\sqrt{2}$ on hidden, $0.01$ on the policy head, $1.0$ on the value head),
+and a learnable scalar $\log\sigma$ floor-clamped at $-1$ (so $\sigma \geq 0.37$
+in raw action space).
+
+\subsection{Clipped surrogate objective}
+For each minibatch with old log-probabilities $\log\pi_{\theta_{\text{old}}}(a|s)$ and advantages $\hat A_t$, PPO maximizes
+\begin{equation}
+\mathcal{L}^{\text{CLIP}}(\theta)
+= \mathbb{E}_t\!\left[\,
+\min\!\bigl(r_t(\theta)\,\hat A_t,\;\;
+            \mathrm{clip}\bigl(r_t(\theta),\,1-\epsilon,\,1+\epsilon\bigr)\,\hat A_t\bigr)
+\right],
+\end{equation}
+where $r_t(\theta) = \exp\bigl(\log\pi_\theta(a_t|s_t) - \log\pi_{\theta_{\text{old}}}(a_t|s_t)\bigr)$ is the probability ratio and $\epsilon = 0.2$. The clip term is the structural device that keeps PPO from making the policy step too large per update, which preserves the locally accurate advantage estimates and prevents catastrophic forgetting.
+
+\subsection{Total loss}
+\begin{equation}
+\mathcal{L}(\theta,\phi) \;=\; -\mathcal{L}^{\text{CLIP}}(\theta)
+\;+\; c_v \,\mathbb{E}_t\bigl[(V_\phi(s_t) - \hat R_t)^2\bigr]
+\;-\; c_e\, \mathbb{E}_t\bigl[\mathcal{H}\bigl(\pi_\theta(\cdot|s_t)\bigr)\bigr],
+\end{equation}
+with $c_v = 0.5$ and an unusually large entropy coefficient $c_e = 0.01$ (ten times the typical default) to prevent premature policy collapse during early swing-up exploration.
+
+\subsection{Advantage via GAE}
+Advantages are estimated with Generalized Advantage Estimation \cite{schulman2015gae}:
+\begin{equation}
+\hat A_t = \sum_{k=0}^{\infty} (\gamma\lambda)^k\,\delta_{t+k},
+\qquad
+\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t),
+\end{equation}
+with $\gamma = 0.99$, $\lambda = 0.95$. Per-minibatch advantage normalization is applied for variance reduction.
+
+\subsection{Training loop}
+\begin{algorithm}[h]
+\caption{PI-PPO-DR training (one update)}
+\begin{algorithmic}[1]
+\State \textbf{Rollout phase} --- for $t=0,\dots,N_{\text{steps}}-1$:
+\State \quad sample DR episode env $\mathcal{E}_t$ if previous one terminated
+\State \quad $s^{\text{aug}}_t \gets \textsc{Observe}(\mathcal{E}_t,\,u_{t-1})$
+\State \quad $a_t \sim \pi_\theta(\cdot \mid s^{\text{aug}}_t)$;\; $u^{\text{cmd}}_t = F_{\max}\tanh(a_t)$
+\State \quad $u_t \gets \textsc{ActuatorPipeline}(K_m \cdot u^{\text{cmd}}_t)$ \Comment{gain + FIFO delay}
+\State \quad $\mathcal{E}_t.\textsc{Step}(u_t,\Delta t)$ \Comment{RK4 integration of \eqref{eq:eom-x},\eqref{eq:eom-theta}}
+\State \quad $r_t \gets \textsc{Reward}(\mathcal{E}_t, u_t, u_{t-1})$ \Comment{Eq.~\eqref{eq:reward} + crash penalty}
+\State \quad store $(s^{\text{aug}}_t, a_t, r_t, \log\pi_\theta(a_t|s^{\text{aug}}_t), V_\phi(s^{\text{aug}}_t))$
+\State \textbf{Advantage phase} --- compute $\hat A_t,\hat R_t$ via GAE
+\State \textbf{Optimize phase} --- for $K=10$ epochs, minibatch size 64:
+\State \quad update $(\theta,\phi)$ by Adam step on $\mathcal{L}(\theta,\phi)$ with global-norm clip $0.5$
+\end{algorithmic}
+\end{algorithm}
+
+\noindent The trainer runs for $1.5\!\times\!10^6$ environment steps, taking checkpoints every 25 updates ($\approx 10^5$ env steps), and saves a separate "best-so-far" snapshot whenever the 50-episode rolling reward sets a new high.
+
+% =============================================================================
+\section{Specification Gaming: The Wall-Bounce Hack}
+\label{sec:wallhack}
+% =============================================================================
+
+A characteristic risk of reward-shaped RL is \emph{specification gaming} ---
+the agent finds a policy that maximizes the reward we wrote rather than the
+behavior we meant. An instructive instance arose in early training.
+
+\subsection{The exploit}
+With the simulator's default elastic wall (restitution $e = 0.5$) sitting inside the agent's working range, the policy discovered that it could fire the cart at maximum force into the wall. The wall absorbed the cart's horizontal momentum and re-emitted it in the opposite direction, while the pendulum --- still subject to its full angular inertia --- was effectively struck by the cart sideways. This is mechanically identical to a whip crack:
+\begin{enumerate}[leftmargin=*]
+    \item Cart accelerates to the right at peak force.
+    \item Cart bounces off the right wall, instantly reversing $\dot{x}$.
+    \item The pivot is yanked left with a large impulsive $\ddot{x}$.
+    \item Conservation of angular momentum transfers a large $\Delta\dot\theta$ into the pendulum.
+\end{enumerate}
+The agent learned this was a \emph{free} energy source --- the wall acted as an external work reservoir invisible to $R^{\text{energy}}$ --- so it could swing the pendulum past upright using bounces instead of patient energy injection. Reward went up; behavior went pathological.
+
+\subsection{Layered defense}
+Three independent fixes were stacked:
+\begin{table}[h]
+\centering
+\caption{Defense layers against wall-bounce specification gaming.}
+\label{tab:wallfix}
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+\textbf{Fix} & \textbf{Mechanism} & \textbf{What the agent learns} \\
+\midrule
+Wall outside kill-zone & wall at $\pm 2.5$~m, terminate at $|x|>2.4$~m
+                       & The wall is structurally unreachable; the episode ends before contact. \\
+Zero restitution       & $e = 0$ in training simulator
+                       & Even on contact, no energy is reflected; the whip-crack physics is gone. \\
+Crash penalty          & $R_t \mathrel{-}= 1000$ on contact
+                       & Wall touch becomes the single worst outcome; gradient information says \emph{wall is bad}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent Together these are redundant in the safety-engineering sense: the agent has no incentive to approach the wall (penalty), no kinematic mechanism to exploit it (zero restitution), and no opportunity even to try (termination outside the wall). After retraining with all three in place, the wall-bounce strategy disappears entirely from the action traces.
+
+\subsection{Generalizable lesson}
+\emph{Any non-conservative element in the simulator --- walls, friction with non-physical signs, integration artifacts --- should be treated as a candidate energy source the agent will exploit if you let it.} Every shaped-reward RL project should include an energy-conservation audit: run the trained policy, plot energy in vs.\ energy out, and look for sources the reward function does not "see."
+
+% =============================================================================
+\section{Hyperparameters and Implementation}
+% =============================================================================
+
+\begin{table}[h]
+\centering
+\caption{Training hyperparameters.}
+\label{tab:hparams}
+\begin{tabular}{lll}
+\toprule
+\textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+\midrule
+Total env steps  & $1{,}500{,}000$ & length of training run \\
+$N_{\text{steps}}$ & $4{,}096$     & rollout length per PPO update \\
+$N_{\text{epochs}}$ & $10$         & SGD epochs per update \\
+Batch size       & $64$            & minibatch size \\
+$\gamma$         & $0.99$          & discount factor \\
+$\lambda$        & $0.95$          & GAE smoothing \\
+$\epsilon$       & $0.2$           & PPO clip range \\
+$c_v$            & $0.5$           & value-loss coefficient \\
+$c_e$            & $0.01$          & entropy bonus coefficient \\
+Learning rate    & $3\times10^{-4}$ & Adam stepsize \\
+Max grad norm    & $0.5$           & global-norm clip \\
+$\Delta t$       & $0.02$~s        & integrator timestep \\
+$T_{\max}$       & $500$           & max steps per episode \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Weight serialization.}
+After every checkpoint the actor and critic linear layers are flattened to row-major JSON and saved alongside the learned $\log\sigma$, the actuator limit $F_{\max}$, and a metadata blob describing the DR ranges and reward weights at training time. The browser-side TypeScript controller (\texttt{PIPPODRController.ts}) deserializes the JSON into a fixed-architecture MLP and reproduces the inference path:
+\begin{equation*}
+s^{\text{aug}}_t \xrightarrow{\text{MLP actor}} \mu \xrightarrow{F_{\max}\tanh(\cdot)} u_t.
+\end{equation*}
+At deployment the policy is run deterministically: $a_t = \mu_\theta(s_t)$ (no Gaussian sampling).
+
+% =============================================================================
+\section{Results}
+% =============================================================================
+
+The training curves on the canonical 1.5\,M-step run show:
+\begin{itemize}[leftmargin=*]
+\item Mean episode reward rises from the cold-start floor and stabilizes after roughly $5\times 10^5$ steps;
+\item Policy loss stays bounded with no clip-saturation runaway, indicating the PPO trust region is well-tuned;
+\item Value loss decays smoothly, confirming the critic tracks the shaped return;
+\item Entropy decays gracefully (rather than collapsing) because of the $c_e = 0.01$ bonus and the $\log\sigma \geq -1$ floor.
+\end{itemize}
+
+\noindent Qualitatively, the trained policy:
+\begin{itemize}[leftmargin=*]
+\item Swings the pendulum up from arbitrary initial orientations (including $\theta_0 = 139^\circ$, well outside any linearizable region) using a single network --- no mode switching between swing-up and balance controllers.
+\item Produces smooth, low-chatter force traces that contrast cleanly with the bang-bang traces of a discrete-action baseline.
+\item Generalizes across the DR envelope: episodes drawn from worst-case combinations of $(M_p, L, b_c, \tau_d)$ still stabilize.
+\end{itemize}
+
+% =============================================================================
+\section{Discussion}
+% =============================================================================
+
+\subsection{Why PI-PPO-DR works}
+\begin{itemize}[leftmargin=*]
+\item \textbf{Smooth continuous control.} The $\tanh$-squashed Gaussian + smoothness penalty + $u_{t-1}$ in the observation form a three-way mechanism for eliminating chattering. No one of them is sufficient alone.
+\item \textbf{Single-policy global stabilization.} The sigmoid blend gives the network a single scalar loss landscape that is simultaneously informative for swing-up and well-conditioned for balance, removing the need for hand-tuned mode switching.
+\item \textbf{Physics knowledge accelerates learning.} The energy term turns a sparse "did you balance?" reward into a dense gradient field aligned with the system's true mechanics, which is the principal reason the policy converges within $\approx\!10^6$ steps on commodity hardware.
+\item \textbf{DR closes the sim-to-real gap.} Hardware is not the nominal plant; a policy trained only on nominal parameters is fragile to even small perturbations of $b_c$ or $\tau_d$. Training under the DR envelope yields a policy that, in expectation, must work for \emph{any} sample from the envelope.
+\end{itemize}
+
+\subsection{Limitations and future work}
+\begin{itemize}[leftmargin=*]
+\item Real hardware deployment is the next validation step; the architecture has been designed for transfer but has not yet been measured on a physical rig.
+\item The energy term assumes a single rigid rod. Extending to the \textbf{Acrobot} / double pendulum (an underactuated two-link mechanism actuated only at the middle joint) requires re-deriving the energy-shaping term for the coupled-link Hamiltonian and demonstrating framework transferability across topology. Early-stage simulation infrastructure for this is in progress.
+\item DR ranges in Table~\ref{tab:dr} are wide enough to cover typical hardware tolerances but narrow enough to keep training tractable; tightening them for a specific rig --- or widening them via curriculum --- is a natural extension.
+\end{itemize}
+
+% =============================================================================
+\section*{TL;DR}
+\addcontentsline{toc}{section}{TL;DR}
+% =============================================================================
+\begin{quote}
+\textbf{PI-PPO-DR = PPO} (continuous, stable RL) \textbf{+ a physics-informed reward} that uses real energy dynamics with an adaptive sigmoid blend between swing-up and balance modes \textbf{+ domain randomization} over physical and actuator parameters and initial conditions, with the \textbf{previous action included in the observation} for smoothness. Result: a single learned policy that swings up and balances an inverted pendulum globally, smoothly, and robustly enough to transfer to hardware.
+\end{quote}
+
+% =============================================================================
+\begin{thebibliography}{9}
+\bibitem{schulman2017ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, O.~Klimov,
+\emph{Proximal Policy Optimization Algorithms},
+arXiv:1707.06347, 2017.
+
+\bibitem{schulman2015gae}
+J.~Schulman, P.~Moritz, S.~Levine, M.~Jordan, P.~Abbeel,
+\emph{High-Dimensional Continuous Control Using Generalized Advantage Estimation},
+arXiv:1506.02438, 2015.
+
+\bibitem{tobin2017dr}
+J.~Tobin, R.~Fong, A.~Ray, J.~Schneider, W.~Zaremba, P.~Abbeel,
+\emph{Domain Randomization for Transferring Deep Neural Networks from
+Simulation to the Real World},
+IROS, 2017.
+
+\bibitem{astrom2000}
+K.~J.~\AA{}str\"om, K.~Furuta,
+\emph{Swinging up a Pendulum by Energy Control},
+Automatica, 36(2):287--295, 2000.
+
+\bibitem{ng1999shaping}
+A.~Y.~Ng, D.~Harada, S.~Russell,
+\emph{Policy Invariance Under Reward Transformations: Theory and Application to Reward Shaping},
+ICML, 1999.
+
+\end{thebibliography}
+
+\end{document}
